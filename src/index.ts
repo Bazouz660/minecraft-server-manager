@@ -19,7 +19,7 @@ const config = {
   rcon: {
     host: process.env.RCON_HOST || "localhost",
     port: parseInt(process.env.RCON_PORT || "25575", 10),
-    password: process.env.RCON_PASSWORD || "minecraft",
+    password: process.env.RCON_PASSWORD || "cacamerde123",
   },
   query: {
     host: process.env.QUERY_HOST || "localhost",
@@ -56,7 +56,7 @@ const app = new Elysia()
   .get("/", () => {
     // Serve the simple HTML directly
     try {
-      const filePath = "./src/public/index-simple.html";
+      const filePath = "./src/public/index.html";
 
       if (!existsSync(filePath)) {
         // If the file doesn't exist, return a simple HTML page
