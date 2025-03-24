@@ -2,8 +2,6 @@
 
 A robust, feature-rich GUI application for managing Minecraft servers with wake-on-demand functionality.
 
-![Screenshot](assets/screenshots/main-screen.png)
-
 ## Features
 
 - **Wake-on-Demand**: Server starts automatically when players try to connect
@@ -14,23 +12,43 @@ A robust, feature-rich GUI application for managing Minecraft servers with wake-
 
 ## Quick Start
 
-1. [Download the latest release](https://github.com/Bazouz660/minecraft-server-manager/releases)
+1. Download the latest release from the [releases page](https://github.com/Bazouz660/minecraft-server-manager/releases)
 2. Place the executable in your Minecraft server directory
 3. Run the application
 4. Players can now connect to your server - it will start automatically!
 
-## Documentation
+## Running from Source
 
-- [Installation Guide](docs/installation.md)
-- [Configuration Options](docs/configuration.md)
-- [Usage Instructions](docs/usage.md)
-- [Development Guide](docs/development.md)
+1. Clone the repository:
 
-## Requirements
+   ```
+   git clone https://github.com/Bazouz660/minecraft-server-manager.git
+   ```
 
-- Windows, macOS, or Linux
-- Minecraft Java Edition server jar file
-- Python 3.8+ (for running from source)
+2. Install dependencies:
+
+   ```
+   pip install -r requirements.txt
+   ```
+
+3. Run the application:
+   ```
+   python run.py
+   ```
+
+## Building the Executable
+
+To create a standalone executable:
+
+```
+python build/build.py
+```
+
+The executable will be created in the `dist` folder.
+
+## Configuration
+
+The application creates a configuration file `server_config.ini` on first run with default settings. You can modify this file directly or use the Settings dialog in the application.
 
 ## License
 
