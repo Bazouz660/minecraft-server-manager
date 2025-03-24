@@ -1,0 +1,19 @@
+{
+  "name": "minecraft-server-manager",
+  "version": "1.0.0",
+  "description": "Web-based Minecraft server manager",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts",
+    "build": "bun build src/index.ts --outdir ./dist"
+  },
+  "dependencies": {
+    "elysia": "^0.7.30",
+    "@elysiajs/static": "^0.7.1"
+  },
+  "devDependencies": {
+    "bun-types": "latest",
+    "typescript": "^5.3.3"
+  }
+}

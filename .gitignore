@@ -1,36 +1,34 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# dependencies (bun install)
+node_modules
 
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
+# output
+out
+dist
+*.tgz
 
-# PyInstaller
-*.manifest
-*.spec
+# code coverage
+coverage
+*.lcov
 
-# Logs
-*.log
+# logs
+logs
+_.log
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
-# Environment
+# dotenv environment variable files
 .env
-.venv
-env/
-venv/
-ENV/
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
 
-# IDE files
-.idea/
-.vscode/
-*.swp
-*.swo
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
 
-# Config files
-server_config.ini
+# IntelliJ based IDEs
+.idea
 
-# Build artifacts
-*.exe
-*.zip
+# Finder (MacOS) folder config
+.DS_Store

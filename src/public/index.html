@@ -1,0 +1,426 @@
+<!-- src/public/index-simple.html -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Minecraft Server Manager</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      button {
+        padding: 10px;
+        margin: 5px;
+        cursor: pointer;
+        background-color: #4caf50;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        font-weight: bold;
+      }
+      button:hover {
+        background-color: #45a049;
+      }
+      button:disabled {
+        background-color: #cccccc;
+        color: #666666;
+        cursor: not-allowed;
+      }
+      button.danger {
+        background-color: #f44336;
+      }
+      button.danger:hover {
+        background-color: #d32f2f;
+      }
+      button.secondary {
+        background-color: #2196f3;
+      }
+      button.secondary:hover {
+        background-color: #0b7dda;
+      }
+      .response {
+        background-color: #f0f0f0;
+        padding: 10px;
+        margin-top: 10px;
+        border-radius: 5px;
+        white-space: pre-wrap;
+        font-family: monospace;
+        max-height: 200px;
+        overflow-y: auto;
+      }
+      .section {
+        margin-bottom: 30px;
+        padding: 15px;
+        background-color: #f9f9f9;
+        border-radius: 5px;
+        border: 1px solid #ddd;
+      }
+      .command-input {
+        display: flex;
+        margin-bottom: 10px;
+      }
+      .command-input input {
+        flex: 1;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        margin-right: 5px;
+      }
+      .config-display {
+        margin-top: 20px;
+        font-size: 0.9em;
+      }
+      h1,
+      h2 {
+        color: #333;
+      }
+      h1 {
+        border-bottom: 2px solid #eee;
+        padding-bottom: 10px;
+        margin-bottom: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Minecraft Server Manager</h1>
+
+    <div class="section">
+      <h2>Server Control</h2>
+      <div>
+        <button id="statusBtn" class="secondary">Check Status</button>
+        <button id="startBtn">Start Server</button>
+        <button id="stopBtn" class="danger">Stop Server</button>
+      </div>
+      <div id="statusResponse" class="response">Status will appear here...</div>
+
+      <div class="config-display">
+        <p><strong>Server Configuration:</strong></p>
+        <div id="serverConfig" class="response" style="font-size: 0.9em">
+          Loading configuration...
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Command Console</h2>
+      <div class="command-input">
+        <input
+          type="text"
+          id="commandInput"
+          placeholder="Enter command (e.g., 'help', 'list', 'say Hello')"
+        />
+        <button id="sendBtn">Send</button>
+      </div>
+      <div id="commandResponse" class="response">
+        Command response will appear here...
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Startup Script Troubleshooting</h2>
+      <div>
+        <button id="examineStartBatBtn" class="secondary">
+          Examine start.bat
+        </button>
+        <button id="fixStartBatBtn" class="secondary">Fix start.bat</button>
+        <button id="createLauncherBtn" class="secondary">
+          Create Direct Launcher
+        </button>
+      </div>
+      <div id="startBatContent" class="response">
+        Click "Examine start.bat" to view content...
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Server Information</h2>
+      <button id="getInfoBtn" class="secondary">Get Detailed Info</button>
+      <div id="serverInfo" class="response">
+        Server information will appear here...
+      </div>
+    </div>
+
+    <script>
+      // Get elements
+      const statusBtn = document.getElementById("statusBtn");
+      const startBtn = document.getElementById("startBtn");
+      const stopBtn = document.getElementById("stopBtn");
+      const statusResponse = document.getElementById("statusResponse");
+      const commandInput = document.getElementById("commandInput");
+      const sendBtn = document.getElementById("sendBtn");
+      const commandResponse = document.getElementById("commandResponse");
+      const getInfoBtn = document.getElementById("getInfoBtn");
+      const serverInfo = document.getElementById("serverInfo");
+      const serverConfig = document.getElementById("serverConfig");
+      const examineStartBatBtn = document.getElementById("examineStartBatBtn");
+      const fixStartBatBtn = document.getElementById("fixStartBatBtn");
+      const createLauncherBtn = document.getElementById("createLauncherBtn");
+      const startBatContent = document.getElementById("startBatContent");
+
+      // Disable buttons by default
+      stopBtn.disabled = true;
+      sendBtn.disabled = true;
+      getInfoBtn.disabled = true;
+
+      // Fetch and display server configuration
+      async function fetchServerConfig() {
+        try {
+          const response = await fetch("/api/config");
+          const data = await response.json();
+          serverConfig.textContent = JSON.stringify(data, null, 2);
+        } catch (error) {
+          // If the /api/config endpoint doesn't exist, show default info
+          serverConfig.textContent = JSON.stringify(
+            {
+              server: {
+                path: "Using configured server path",
+                startScript: "Using start.bat (if available)",
+              },
+              note: "Detailed configuration not available",
+            },
+            null,
+            2
+          );
+        }
+      }
+
+      // Check server status and update UI
+      async function checkServerStatus() {
+        try {
+          statusBtn.disabled = true;
+          statusResponse.textContent = "Checking server status...";
+
+          const response = await fetch("/api/status");
+          const data = await response.json();
+          statusResponse.textContent = JSON.stringify(data, null, 2);
+
+          // Update button states based on server status
+          if (data.isRunning) {
+            if (data.shutdownInProgress) {
+              startBtn.disabled = true;
+              stopBtn.disabled = true;
+              sendBtn.disabled = true;
+              getInfoBtn.disabled = true;
+              statusResponse.textContent =
+                "Server is shutting down...\n\n" +
+                JSON.stringify(data, null, 2);
+            } else {
+              startBtn.disabled = true;
+              stopBtn.disabled = false;
+              sendBtn.disabled = false;
+              getInfoBtn.disabled = false;
+            }
+          } else {
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            sendBtn.disabled = true;
+            getInfoBtn.disabled = true;
+          }
+        } catch (error) {
+          statusResponse.textContent = `Error checking status: ${error.message}`;
+        } finally {
+          statusBtn.disabled = false;
+        }
+      }
+
+      // Start the server
+      async function startServer() {
+        try {
+          startBtn.disabled = true;
+          statusResponse.textContent = "Starting server...";
+
+          const response = await fetch("/api/start", { method: "POST" });
+          const data = await response.json();
+          statusResponse.textContent = JSON.stringify(data, null, 2);
+
+          if (data.success) {
+            // Check status after a delay
+            setTimeout(checkServerStatus, 5000);
+          } else {
+            startBtn.disabled = false;
+          }
+        } catch (error) {
+          statusResponse.textContent = `Error starting server: ${error.message}`;
+          startBtn.disabled = false;
+        }
+      }
+
+      // Stop the server
+      async function stopServer() {
+        if (!confirm("Are you sure you want to stop the server?")) {
+          return;
+        }
+
+        try {
+          stopBtn.disabled = true;
+          statusResponse.textContent = "Stopping server...";
+
+          const response = await fetch("/api/stop", { method: "POST" });
+          const data = await response.json();
+          statusResponse.textContent = JSON.stringify(data, null, 2);
+
+          // Check status after a delay
+          setTimeout(checkServerStatus, 5000);
+        } catch (error) {
+          statusResponse.textContent = `Error stopping server: ${error.message}`;
+          stopBtn.disabled = false;
+        }
+      }
+
+      // Send a command to the server
+      async function sendCommand() {
+        const command = commandInput.value.trim();
+        if (!command) return;
+
+        try {
+          sendBtn.disabled = true;
+          commandResponse.textContent = "Sending command...";
+
+          const response = await fetch("/api/command", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command }),
+          });
+
+          const data = await response.json();
+
+          if (data.success) {
+            commandResponse.textContent =
+              data.response || "Command executed successfully";
+            commandInput.value = ""; // Clear input on success
+          } else {
+            commandResponse.textContent = `Error: ${data.message}`;
+          }
+        } catch (error) {
+          commandResponse.textContent = `Error sending command: ${error.message}`;
+        } finally {
+          sendBtn.disabled = false;
+        }
+      }
+
+      // Get detailed server information
+      async function getServerInfo() {
+        try {
+          getInfoBtn.disabled = true;
+          serverInfo.textContent = "Loading server information...";
+
+          const response = await fetch("/api/info");
+          const data = await response.json();
+
+          if (data.success) {
+            serverInfo.textContent = JSON.stringify(data.info, null, 2);
+          } else {
+            serverInfo.textContent = `Error: ${data.message}`;
+          }
+        } catch (error) {
+          serverInfo.textContent = `Error getting server information: ${error.message}`;
+        } finally {
+          getInfoBtn.disabled = false;
+        }
+      }
+
+      // Examine start.bat file
+      async function examineStartBat() {
+        try {
+          examineStartBatBtn.disabled = true;
+          startBatContent.textContent = "Loading start.bat content...";
+
+          const response = await fetch("/api/examine-start-bat");
+          const data = await response.json();
+
+          if (data.content) {
+            startBatContent.textContent = data.content;
+          } else {
+            startBatContent.textContent = "Unable to read start.bat file";
+          }
+        } catch (error) {
+          startBatContent.textContent = `Error examining start.bat: ${error.message}`;
+        } finally {
+          examineStartBatBtn.disabled = false;
+        }
+      }
+
+      // Fix start.bat file
+      async function fixStartBat() {
+        if (
+          !confirm(
+            "This will attempt to fix your start.bat file by adding quotes around paths. A backup will be created. Continue?"
+          )
+        ) {
+          return;
+        }
+
+        try {
+          fixStartBatBtn.disabled = true;
+          startBatContent.textContent = "Fixing start.bat...";
+
+          const response = await fetch("/api/fix-start-bat", {
+            method: "POST",
+          });
+          const data = await response.json();
+
+          startBatContent.textContent = data.message;
+
+          // If successful, show the updated content
+          if (data.success) {
+            setTimeout(examineStartBat, 1000);
+          }
+        } catch (error) {
+          startBatContent.textContent = `Error fixing start.bat: ${error.message}`;
+        } finally {
+          fixStartBatBtn.disabled = false;
+        }
+      }
+
+      // Create direct launcher
+      async function createLauncher() {
+        try {
+          createLauncherBtn.disabled = true;
+          startBatContent.textContent = "Creating direct launcher...";
+
+          const response = await fetch("/api/create-launcher");
+          const data = await response.json();
+
+          startBatContent.textContent = data.message;
+
+          if (data.success) {
+            // Add a note about using the new launcher
+            startBatContent.textContent +=
+              "\n\nYou can now use this launcher instead of your start.bat file.";
+          }
+        } catch (error) {
+          startBatContent.textContent = `Error creating launcher: ${error.message}`;
+        } finally {
+          createLauncherBtn.disabled = false;
+        }
+      }
+
+      // Event listeners
+      statusBtn.addEventListener("click", checkServerStatus);
+      startBtn.addEventListener("click", startServer);
+      stopBtn.addEventListener("click", stopServer);
+      sendBtn.addEventListener("click", sendCommand);
+      getInfoBtn.addEventListener("click", getServerInfo);
+      examineStartBatBtn.addEventListener("click", examineStartBat);
+      fixStartBatBtn.addEventListener("click", fixStartBat);
+      createLauncherBtn.addEventListener("click", createLauncher);
+
+      // Handle Enter key in command input
+      commandInput.addEventListener("keypress", (e) => {
+        if (e.key === "Enter") {
+          sendCommand();
+        }
+      });
+
+      // Initialize
+      document.addEventListener("DOMContentLoaded", () => {
+        fetchServerConfig();
+        checkServerStatus();
+      });
+    </script>
+  </body>
+</html>
