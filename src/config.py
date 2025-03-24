@@ -34,7 +34,22 @@ DEFAULT_CONFIG = {
     },
     'System': {
         'debug_mode': 'false',
-    }
+    },
+    'Backup': {
+        'enabled': 'false',
+        'interval': '24',
+        'directory': './backups',
+        'keep_last': 'true',
+        'num_backups': '5',
+        'size_limit': 'false',
+        'max_size': '5',
+        'compression': 'zip',
+    },
+    'Performance': {
+        'monitor_enabled': 'true',
+        'update_interval': '300',
+        'history_length': '288',
+    },
 }
 
 def create_default_config(config_file=CONFIG_FILE):

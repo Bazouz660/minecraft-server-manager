@@ -10,7 +10,7 @@ import traceback
 from enum import Enum, auto
 
 # Version information
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 # Server states
 class ServerState(Enum):
@@ -28,6 +28,14 @@ class TaskType:
     RESTART_SERVER = "restart_server"
     CHECK_STATUS = "check_status"
     GET_PLAYERS = "get_players"
+    GET_STATUS = "get_status"
+    GET_PERFORMANCE = "get_performance"
+    RUN_COMMAND = "run_command"
+    BACKUP_WORLD = "backup_world"
+    LOAD_PROPERTIES = "load_properties"
+    SAVE_PROPERTIES = "save_properties"
+    UPDATE_JAVA_SETTINGS = "update_java_settings"
+    GET_PLAYER_INFO = "get_player_info"
 
 class Task:
     """Task object for the worker queue"""
@@ -38,6 +46,14 @@ class Task:
         self.result = None
         self.error = None
         self.completed = False
+        # New callback for status updates
+        self.on_status_update = None
+
+        # Performance monitor
+        self.performance_monitor = PerformanceMonitor(self)
+
+        # Server properties manager
+        self.properties_manager = ServerPropertiesManager()
 
 def setup_logging(log_file="server_manager.log", console=True, debug=False):
     """Configure logging"""

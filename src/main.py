@@ -9,7 +9,7 @@ import logging
 # Internal imports
 from .utils import setup_logging, check_bat_file, VERSION
 from .config import load_config
-from .server_manager import ServerManager
+from .server_manager import EnhancedServerManager  # Updated import
 from .gui import ServerManagerGUI
 
 def main():
@@ -34,7 +34,7 @@ def main():
             logging.warning("Default RCON password detected! Please change it in the settings.")
 
         # Create server manager
-        server_manager = ServerManager(config)
+        server_manager = EnhancedServerManager(config)  # Updated class
 
         # Create and run GUI
         gui = ServerManagerGUI(server_manager)

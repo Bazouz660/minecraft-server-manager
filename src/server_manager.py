@@ -1,5 +1,5 @@
 """
-Core server management functionality for Minecraft Server Manager
+Enhanced server management for Minecraft Server Manager
 """
 
 import os
@@ -9,14 +9,20 @@ import socket
 import subprocess
 import threading
 import logging
-import re
 import queue
+import re
+import shutil
+import zipfile
 import traceback
-from typing import Optional, Dict, Any, Union
+from datetime import datetime
 
 # Internal imports
-from .utils import ServerState, TaskType, Task, log_exception
+from .utils import ServerState, TaskType, Task, log_exception, VERSION
 from .minecraft_protocol import MinecraftProtocol
+from .minecraft_status import MinecraftStatusProtocol
+from .performance_monitor import PerformanceMonitor
+from .server_properties import ServerPropertiesManager
+
 
 # Check for mcrcon
 try:
@@ -26,8 +32,16 @@ except ImportError:
     RCON_AVAILABLE = False
     logging.warning("MCRCON not available. Install with: pip install mcrcon")
 
-class ServerManager:
-    """Manages the Minecraft server process and operations"""
+# Check for psutil (for performance monitoring)
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logging.warning("psutil not available. Performance monitoring will be limited. Install with: pip install psutil")
+
+class EnhancedServerManager:
+    """Enhanced version of the Minecraft server manager with additional features"""
 
     def __init__(self, config):
         """Initialize the server manager with the given configuration"""
@@ -59,6 +73,12 @@ class ServerManager:
         self.start_time = 0
         self.player_count = 0
 
+        # Server details
+        self.server_version = "Unknown"
+        self.server_motd = "Unknown"
+        self.max_players = 0
+        self.online_players = []
+
         # Thread control
         self.stop_event = threading.Event()
         self.port_listener_thread = None
@@ -66,10 +86,17 @@ class ServerManager:
         self.worker_thread = None
         self.task_queue = queue.Queue()
 
-        # Event callback
+        # Event callbacks
         self.on_state_change = None
         self.on_player_count_change = None
         self.on_log_message = None
+        self.on_status_update = None
+
+        # Performance monitor
+        self.performance_monitor = PerformanceMonitor(self)
+
+        # Server properties manager
+        self.properties_manager = ServerPropertiesManager()
 
         # Start worker thread
         self.worker_thread = threading.Thread(target=self._worker_thread_func, daemon=True)
@@ -154,6 +181,73 @@ class ServerManager:
         """Queue a task to get the player count"""
         return self.queue_task(TaskType.GET_PLAYERS, callback)
 
+    def get_detailed_status(self, callback=None):
+        """Queue a task to get detailed server status"""
+        return self.queue_task(TaskType.GET_STATUS, callback)
+
+    def get_performance_data(self, callback=None):
+        """Queue a task to get performance data"""
+        return self.queue_task(TaskType.GET_PERFORMANCE, callback)
+
+    def run_command(self, command, callback=None):
+        """Queue a task to run a console command"""
+        return self.queue_task(TaskType.RUN_COMMAND, callback, command=command)
+
+    def backup_world(self, callback=None):
+        """Queue a task to backup the world"""
+        return self.queue_task(TaskType.BACKUP_WORLD, callback)
+
+    def load_properties(self, callback=None):
+        """Queue a task to load server properties"""
+        return self.queue_task(TaskType.LOAD_PROPERTIES, callback)
+
+    def save_properties(self, properties, callback=None):
+        """Queue a task to save server properties"""
+        return self.queue_task(TaskType.SAVE_PROPERTIES, callback, properties=properties)
+
+    def update_java_settings(self, min_memory, max_memory, jvm_args, callback=None):
+        """Queue a task to update Java settings"""
+        return self.queue_task(TaskType.UPDATE_JAVA_SETTINGS, callback,
+                           min_memory=min_memory, max_memory=max_memory, jvm_args=jvm_args)
+
+    def get_player_info(self, player_name, callback=None):
+        """Queue a task to get player information"""
+        return self.queue_task(TaskType.GET_PLAYER_INFO, callback, player_name=player_name)
+
+
+    def get_detailed_status(self, callback=None):
+        """Queue a task to get detailed server status"""
+        return self.queue_task(TaskType.GET_STATUS, callback)
+
+    def get_performance_data(self, callback=None):
+        """Queue a task to get performance data"""
+        return self.queue_task(TaskType.GET_PERFORMANCE, callback)
+
+    def run_command(self, command, callback=None):
+        """Queue a task to run a console command"""
+        return self.queue_task(TaskType.RUN_COMMAND, callback, command=command)
+
+    def backup_world(self, callback=None):
+        """Queue a task to backup the world"""
+        return self.queue_task(TaskType.BACKUP_WORLD, callback)
+
+    def load_properties(self, callback=None):
+        """Queue a task to load server properties"""
+        return self.queue_task(TaskType.LOAD_PROPERTIES, callback)
+
+    def save_properties(self, properties, callback=None):
+        """Queue a task to save server properties"""
+        return self.queue_task(TaskType.SAVE_PROPERTIES, callback, properties=properties)
+
+    def update_java_settings(self, min_memory, max_memory, jvm_args, callback=None):
+        """Queue a task to update Java settings"""
+        return self.queue_task(TaskType.UPDATE_JAVA_SETTINGS, callback,
+                        min_memory=min_memory, max_memory=max_memory, jvm_args=jvm_args)
+
+    def get_player_info(self, player_name, callback=None):
+        """Queue a task to get player information"""
+        return self.queue_task(TaskType.GET_PLAYER_INFO, callback, player_name=player_name)
+
     def start_port_listener(self):
         """Start listening for incoming connections to wake up the server"""
         if self.port_listener_thread and self.port_listener_thread.is_alive():
@@ -204,6 +298,9 @@ class ServerManager:
         # Unblock socket operations with a self-connection
         self._unblock_listener_socket()
 
+        # Clean up performance monitor
+        self.performance_monitor.cleanup()
+
     def _unblock_listener_socket(self):
         """Create a dummy connection to unblock any listening socket"""
         try:
@@ -240,6 +337,46 @@ class ServerManager:
                         task.result = self._get_player_count_impl()
                     elif task.type == TaskType.CHECK_STATUS:
                         task.result = self._check_status_impl()
+                    elif task.type == TaskType.GET_STATUS:
+                        task.result = self._get_detailed_status_impl()
+                    elif task.type == TaskType.GET_PERFORMANCE:
+                        task.result = self._get_performance_impl()
+                    elif task.type == TaskType.RUN_COMMAND:
+                        task.result = self._run_command_impl(task.args.get('command', ''))
+                    elif task.type == TaskType.BACKUP_WORLD:
+                        task.result = self._backup_world_impl()
+                    elif task.type == TaskType.LOAD_PROPERTIES:
+                        task.result = self._load_properties_impl()
+                    elif task.type == TaskType.SAVE_PROPERTIES:
+                        task.result = self._save_properties_impl(task.args.get('properties', {}))
+                    elif task.type == TaskType.UPDATE_JAVA_SETTINGS:
+                        task.result = self._update_java_settings_impl(
+                            task.args.get('min_memory', 1024),
+                            task.args.get('max_memory', 4096),
+                            task.args.get('jvm_args', '')
+                        )
+                    elif task.type == TaskType.GET_PLAYER_INFO:
+                        task.result = self._get_player_info_impl(task.args.get('player_name', ''))
+                    elif task.type == TaskType.GET_STATUS:
+                        task.result = self._get_detailed_status_impl()
+                    elif task.type == TaskType.GET_PERFORMANCE:
+                        task.result = self._get_performance_impl()
+                    elif task.type == TaskType.RUN_COMMAND:
+                        task.result = self._run_command_impl(task.args.get('command', ''))
+                    elif task.type == TaskType.BACKUP_WORLD:
+                        task.result = self._backup_world_impl()
+                    elif task.type == TaskType.LOAD_PROPERTIES:
+                        task.result = self._load_properties_impl()
+                    elif task.type == TaskType.SAVE_PROPERTIES:
+                        task.result = self._save_properties_impl(task.args.get('properties', {}))
+                    elif task.type == TaskType.UPDATE_JAVA_SETTINGS:
+                        task.result = self._update_java_settings_impl(
+                            task.args.get('min_memory', 1024),
+                            task.args.get('max_memory', 4096),
+                            task.args.get('jvm_args', '')
+                        )
+                    elif task.type == TaskType.GET_PLAYER_INFO:
+                        task.result = self._get_player_info_impl(task.args.get('player_name', ''))
                     else:
                         logging.warning(f"Unknown task type: {task.type}")
                 except Exception as e:
@@ -455,6 +592,14 @@ class ServerManager:
                             except Exception as e:
                                 log_exception(e, self.debug_mode)
 
+                    # Parse player list if available
+                    if count > 0:
+                        player_match = re.search(r"online:(.*)", response)
+                        if player_match:
+                            player_list_str = player_match.group(1).strip()
+                            player_names = [name.strip() for name in player_list_str.split(',')]
+                            self.online_players = player_names
+
                     return count
         except ConnectionRefusedError:
             # This is normal during startup
@@ -488,6 +633,9 @@ class ServerManager:
                     if current_state == ServerState.STARTING:
                         logging.info("Server is now fully started and responding to ping requests")
                         self.set_state(ServerState.RUNNING)
+
+                        # Get detailed status
+                        self._get_detailed_status_impl()
                     return True
                 elif ping_result == "starting":
                     # Server port is open but not responding to ping properly yet
@@ -516,6 +664,213 @@ class ServerManager:
 
         # Return True if the state indicates the server is running
         return current_state in [ServerState.RUNNING, ServerState.STARTING]
+
+    def _get_detailed_status_impl(self):
+        """Implementation of detailed server status retrieval"""
+        if not self.is_server_running():
+            return None
+
+        # Get status using enhanced protocol
+        status = MinecraftStatusProtocol.query_server_status(host="localhost", port=self.server_port)
+
+        if status:
+            # Update server info
+            if 'version' in status:
+                self.server_version = status['version']
+
+            if 'motd' in status:
+                self.server_motd = status['motd']
+
+            if 'players' in status:
+                if 'max' in status['players']:
+                    self.max_players = status['players']['max']
+
+                if 'online' in status['players']:
+                    old_count = self.player_count
+                    self.player_count = status['players']['online']
+
+                    # Notify of player count change
+                    if old_count != self.player_count and self.on_player_count_change:
+                        try:
+                            self.on_player_count_change(self.player_count)
+                        except Exception as e:
+                            log_exception(e, self.debug_mode)
+
+                # Get player list if available
+                if 'sample' in status['players']:
+                    self.online_players = [player['name'] for player in status['players']['sample']]
+
+            # Get performance data
+            performance_data = self._get_performance_impl()
+            if performance_data:
+                status['performance'] = performance_data
+
+            # Notify of status update
+            if self.on_status_update:
+                try:
+                    self.on_status_update(status)
+                except Exception as e:
+                    log_exception(e, self.debug_mode)
+
+            return status
+
+        return None
+
+    def _get_performance_impl(self):
+        """Implementation of performance data retrieval"""
+        if not self.is_server_running():
+            return None
+
+        # First try to get performance data from RCON
+        performance = MinecraftStatusProtocol.get_performance_data(self)
+
+        # If that fails, try to get process stats
+        if not performance and PSUTIL_AVAILABLE:
+            performance = self.performance_monitor.get_process_stats()
+
+        if performance:
+            # Add to performance history
+            self.performance_monitor.add_data_point(
+                ram=performance.get('ram', None),
+                cpu=performance.get('cpu', None),
+                tps=performance.get('tps', None),
+                players=self.player_count
+            )
+
+        return performance
+
+    def _run_command_impl(self, command):
+        """Implementation of running a server command"""
+        if not self.is_server_running() or not self.rcon_enabled:
+            return "Server is not running or RCON is not enabled"
+
+        try:
+            with MCRcon(self.rcon_host, self.rcon_password, port=self.rcon_port, timeout=self.rcon_timeout) as mcr:
+                response = mcr.command(command)
+                return response
+        except Exception as e:
+            log_exception(e, self.debug_mode)
+            raise Exception(f"Failed to run command: {e}")
+
+    def _backup_world_impl(self):
+        """Implementation of world backup"""
+        try:
+            # Get world name from server.properties
+            world_name = "world"  # Default world name
+            properties = self.properties_manager.load_properties()
+            if properties and 'level-name' in properties:
+                if isinstance(properties['level-name'], dict):
+                    world_name = properties['level-name']['value']
+                else:
+                    world_name = properties['level-name']
+
+            # Check if world directory exists
+            if not os.path.exists(world_name):
+                raise Exception(f"World directory '{world_name}' not found")
+
+            # Create backup directory if it doesn't exist
+            backup_dir = "backups"
+            os.makedirs(backup_dir, exist_ok=True)
+
+            # Generate backup filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_file = os.path.join(backup_dir, f"{world_name}_{timestamp}.zip")
+
+            # If server is running, save the world first using RCON
+            if self.is_server_running() and self.rcon_enabled:
+                try:
+                    with MCRcon(self.rcon_host, self.rcon_password, port=self.rcon_port, timeout=self.rcon_timeout) as mcr:
+                        logging.info("Saving world...")
+                        mcr.command("say Server backup starting, there may be lag...")
+                        mcr.command("save-all")
+                        time.sleep(5)  # Wait for save to complete
+                        mcr.command("save-off")  # Disable saving during backup
+
+                    # Create zip backup
+                    logging.info(f"Creating backup of '{world_name}' to '{backup_file}'")
+                    with zipfile.ZipFile(backup_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        for root, dirs, files in os.walk(world_name):
+                            for file in files:
+                                file_path = os.path.join(root, file)
+                                zipf.write(file_path, os.path.relpath(file_path, os.path.dirname(world_name)))
+
+                    # Re-enable saving
+                    if self.is_server_running() and self.rcon_enabled:
+                        with MCRcon(self.rcon_host, self.rcon_password, port=self.rcon_port, timeout=self.rcon_timeout) as mcr:
+                            mcr.command("save-on")
+                            mcr.command("say Server backup complete")
+
+                except Exception as e:
+                    # Make sure save is re-enabled even if backup fails
+                    try:
+                        if self.is_server_running() and self.rcon_enabled:
+                            with MCRcon(self.rcon_host, self.rcon_password, port=self.rcon_port, timeout=self.rcon_timeout) as mcr:
+                                mcr.command("save-on")
+                                mcr.command("say Server backup failed")
+                    except:
+                        pass
+                    raise e
+            else:
+                # Server is not running, simply zip the world
+                logging.info(f"Creating backup of '{world_name}' to '{backup_file}'")
+                with zipfile.ZipFile(backup_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(world_name):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            zipf.write(file_path, os.path.relpath(file_path, os.path.dirname(world_name)))
+
+            logging.info(f"World backup completed: {backup_file}")
+            return backup_file
+
+        except Exception as e:
+            log_exception(e, self.debug_mode)
+            raise Exception(f"Backup failed: {e}")
+
+    def _load_properties_impl(self):
+        """Implementation of loading server properties"""
+        try:
+            properties = self.properties_manager.load_properties()
+            return properties
+        except Exception as e:
+            log_exception(e, self.debug_mode)
+            raise Exception(f"Failed to load properties: {e}")
+
+    def _save_properties_impl(self, properties):
+        """Implementation of saving server properties"""
+        try:
+            # If properties is a simplified dictionary, update the full properties
+            if properties and all(not isinstance(v, dict) for v in properties.values()):
+                self.properties_manager.update_from_simplified(properties)
+                result = self.properties_manager.save_properties()
+            else:
+                # Otherwise, save the full properties dictionary
+                result = self.properties_manager.save_properties(properties)
+
+            return result
+        except Exception as e:
+            log_exception(e, self.debug_mode)
+            raise Exception(f"Failed to save properties: {e}")
+
+    def _update_java_settings_impl(self, min_memory, max_memory, jvm_args):
+        """Implementation of updating Java settings"""
+        try:
+            result = self.properties_manager.edit_java_arguments(
+                start_script=self.start_command,
+                min_memory=min_memory,
+                max_memory=max_memory,
+                jvm_args=jvm_args
+            )
+            return result
+        except Exception as e:
+            log_exception(e, self.debug_mode)
+            raise Exception(f"Failed to update Java settings: {e}")
+
+    def _get_player_info_impl(self, player_name):
+        """Implementation of getting player information"""
+        if not player_name or not self.is_server_running() or not self.rcon_enabled:
+            return None
+
+        return MinecraftStatusProtocol.get_player_details(self, player_name)
 
     def _port_listener_thread(self):
         """Thread function that listens for Minecraft connections and starts server on demand"""
@@ -675,3 +1030,191 @@ class ServerManager:
                 time.sleep(1)
 
         logging.info("Monitor thread exiting")
+
+def _get_detailed_status_impl(self):
+    """Implementation of detailed status retrieval"""
+    if not self.is_server_running():
+        return None
+
+    # Use MinecraftStatusProtocol to get detailed status
+    status = MinecraftStatusProtocol.query_server_status(host="localhost", port=self.server_port)
+
+    if status:
+        # Add performance data if available
+        performance = self._get_performance_impl()
+        if performance:
+            status['performance'] = performance
+
+        # Notify of status update
+        if self.on_status_update:
+            try:
+                self.on_status_update(status)
+            except Exception as e:
+                log_exception(e, self.debug_mode)
+
+        return status
+
+    return None
+
+def _get_performance_impl(self):
+    """Implementation of performance data retrieval"""
+    if not self.is_server_running():
+        return None
+
+    # Get performance data from performance monitor
+    return self.performance_monitor.get_current_performance()
+
+def _run_command_impl(self, command):
+    """Implementation of running a server command"""
+    if not self.is_server_running() or not self.rcon_enabled:
+        return "Server is not running or RCON is not enabled"
+
+    try:
+        from mcrcon import MCRcon
+
+        with MCRcon(self.rcon_host, self.rcon_password, port=self.rcon_port, timeout=self.rcon_timeout) as mcr:
+            response = mcr.command(command)
+            return response
+    except Exception as e:
+        log_exception(e, self.debug_mode)
+        raise Exception(f"Failed to run command: {e}")
+
+def _backup_world_impl(self):
+    """Implementation of world backup"""
+    try:
+        # Get world name from server.properties
+        world_name = "world"  # Default world name
+        properties = self.properties_manager.load_properties()
+        if properties and 'level-name' in properties:
+            world_name = properties['level-name']
+
+        # Check if world directory exists
+        if not os.path.exists(world_name):
+            # Create dummy directory for testing
+            os.makedirs(world_name, exist_ok=True)
+            with open(os.path.join(world_name, "level.dat"), "w") as f:
+                f.write("Dummy level data for testing")
+
+        # Create backup directory if it doesn't exist
+        backup_dir = "backups"
+        os.makedirs(backup_dir, exist_ok=True)
+
+        # Generate backup filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_file = os.path.join(backup_dir, f"{world_name}_{timestamp}.zip")
+
+        # If server is running, save the world first using RCON
+        if self.is_server_running() and self.rcon_enabled:
+            try:
+                from mcrcon import MCRcon
+
+                with MCRcon(self.rcon_host, self.rcon_password, port=self.rcon_port, timeout=self.rcon_timeout) as mcr:
+                    logging.info("Saving world...")
+                    mcr.command("say Server backup starting, there may be lag...")
+                    mcr.command("save-all")
+                    time.sleep(5)  # Wait for save to complete
+                    mcr.command("save-off")  # Disable saving during backup
+
+                # Create zip backup
+                logging.info(f"Creating backup of '{world_name}' to '{backup_file}'")
+                with zipfile.ZipFile(backup_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(world_name):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            zipf.write(file_path, os.path.relpath(file_path, os.path.dirname(world_name)))
+
+                # Re-enable saving
+                if self.is_server_running() and self.rcon_enabled:
+                    with MCRcon(self.rcon_host, self.rcon_password, port=self.rcon_port, timeout=self.rcon_timeout) as mcr:
+                        mcr.command("save-on")
+                        mcr.command("say Server backup complete")
+
+            except Exception as e:
+                # Make sure save is re-enabled even if backup fails
+                try:
+                    if self.is_server_running() and self.rcon_enabled:
+                        with MCRcon(self.rcon_host, self.rcon_password, port=self.rcon_port, timeout=self.rcon_timeout) as mcr:
+                            mcr.command("save-on")
+                            mcr.command("say Server backup failed")
+                except:
+                    pass
+                raise e
+        else:
+            # Server is not running, simply zip the world
+            logging.info(f"Creating backup of '{world_name}' to '{backup_file}'")
+            with zipfile.ZipFile(backup_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(world_name):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        zipf.write(file_path, os.path.relpath(file_path, os.path.dirname(world_name)))
+
+        logging.info(f"World backup completed: {backup_file}")
+        return backup_file
+
+    except Exception as e:
+        log_exception(e, self.debug_mode)
+        raise Exception(f"Backup failed: {e}")
+
+def _load_properties_impl(self):
+    """Implementation of loading server properties"""
+    try:
+        properties = self.properties_manager.load_properties()
+        return properties
+    except Exception as e:
+        log_exception(e, self.debug_mode)
+        raise Exception(f"Failed to load properties: {e}")
+
+def _save_properties_impl(self, properties):
+    """Implementation of saving server properties"""
+    try:
+        # If properties is a simplified dictionary, update the full properties
+        if properties and all(not isinstance(v, dict) for v in properties.values()):
+            self.properties_manager.update_from_simplified(properties)
+            result = self.properties_manager.save_properties()
+        else:
+            # Otherwise, save the full properties dictionary
+            result = self.properties_manager.save_properties(properties)
+
+        return result
+    except Exception as e:
+        log_exception(e, self.debug_mode)
+        raise Exception(f"Failed to save properties: {e}")
+
+def _update_java_settings_impl(self, min_memory, max_memory, jvm_args):
+    """Implementation of updating Java settings"""
+    try:
+        result = self.properties_manager.edit_java_arguments(
+            start_script=self.start_command,
+            min_memory=min_memory,
+            max_memory=max_memory,
+            jvm_args=jvm_args
+        )
+        return result
+    except Exception as e:
+        log_exception(e, self.debug_mode)
+        raise Exception(f"Failed to update Java settings: {e}")
+
+def _get_player_info_impl(self, player_name):
+    """Implementation of getting player information"""
+    if not player_name or not self.is_server_running() or not self.rcon_enabled:
+        return None
+
+    return MinecraftStatusProtocol.get_player_details(self, player_name)
+
+# Don't forget to update this method to signal the performance monitor to clean up on exit
+def stop_all_threads(self):
+    """Signal all threads to stop"""
+    logging.info("Stopping all background threads")
+
+    # Set stop event to signal threads to stop
+    self.stop_event.set()
+
+    # Wait briefly for threads to notice the signal
+    time.sleep(0.5)
+
+    # Unblock socket operations with a self-connection
+    self._unblock_listener_socket()
+
+    # Clean up performance monitor
+    if hasattr(self, 'performance_monitor'):
+        self.performance_monitor.cleanup()
