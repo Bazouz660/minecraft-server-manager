@@ -523,4 +523,97 @@
       fetchAutoShutdownSettings(); // Add this line
     });
   </script>
+
+  <!-- Add this section to your index.html file, just after the Auto-Shutdown Settings section -->
+  <div class="section">
+    <h2>Wake-on-Demand Settings</h2>
+    <div>
+      <label>
+        <input type="checkbox" id="wakeOnDemandEnabled" />
+        Enable wake-on-demand (auto-start when players connect)
+      </label>
+      <div style="margin-top: 10px">
+        <p>
+          <small
+            >When enabled, the server will automatically start when a player
+            tries to connect.</small
+          >
+        </p>
+      </div>
+      <button
+        id="saveWakeOnDemandBtn"
+        class="secondary"
+        style="margin-top: 10px"
+      >
+        Save Settings
+      </button>
+    </div>
+    <div id="wakeOnDemandStatus" class="response" style="margin-top: 10px">
+      Wake-on-demand settings not loaded...
+    </div>
+  </div>
+
+  <!-- Add this JavaScript to the end of your existing <script> section -->
+  <script>
+    // Add these element references with your other element references
+    const wakeOnDemandEnabled = document.getElementById("wakeOnDemandEnabled");
+    const saveWakeOnDemandBtn = document.getElementById("saveWakeOnDemandBtn");
+    const wakeOnDemandStatus = document.getElementById("wakeOnDemandStatus");
+
+    // Fetch wake-on-demand settings
+    async function fetchWakeOnDemandSettings() {
+      try {
+        const response = await fetch("/api/wake-on-demand");
+        const data = await response.json();
+
+        // Update the UI
+        wakeOnDemandEnabled.checked = data.enabled;
+
+        wakeOnDemandStatus.textContent = data.enabled
+          ? "Wake-on-demand is enabled. Server will start automatically when a player tries to connect."
+          : "Wake-on-demand is disabled.";
+      } catch (error) {
+        wakeOnDemandStatus.textContent = `Error fetching wake-on-demand settings: ${error.message}`;
+      }
+    }
+
+    // Save wake-on-demand settings
+    async function saveWakeOnDemandSettings() {
+      try {
+        saveWakeOnDemandBtn.disabled = true;
+        wakeOnDemandStatus.textContent = "Saving settings...";
+
+        const response = await fetch("/api/wake-on-demand", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: wakeOnDemandEnabled.checked,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          wakeOnDemandStatus.textContent = data.message;
+        } else {
+          wakeOnDemandStatus.textContent = `Error: ${data.message}`;
+        }
+      } catch (error) {
+        wakeOnDemandStatus.textContent = `Error saving wake-on-demand settings: ${error.message}`;
+      } finally {
+        saveWakeOnDemandBtn.disabled = false;
+      }
+    }
+
+    // Add event listener
+    saveWakeOnDemandBtn.addEventListener("click", saveWakeOnDemandSettings);
+
+    // Modify your existing initialization
+    document.addEventListener("DOMContentLoaded", () => {
+      fetchServerConfig();
+      checkServerStatus();
+      fetchAutoShutdownSettings();
+      fetchWakeOnDemandSettings(); // Add this line
+    });
+  </script>
 </html>

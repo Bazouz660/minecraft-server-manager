@@ -7,10 +7,10 @@ import { QueryClient } from "./protocols/query";
 import { join } from "path";
 
 // Load configuration
+// Update your config object to include wake-on-demand settings
 const config = {
   server: {
-    path:
-      process.env.MC_SERVER_PATH || "C:\\games\\Rlcraft Dregora Server - Copie",
+    path: process.env.MC_SERVER_PATH || "C:\\games\\Rlcraft Dregora Server",
     startScript: process.env.MC_START_SCRIPT || "start.bat",
     jarFile: process.env.MC_SERVER_JAR || "server.jar",
     javaPath: process.env.JAVA_PATH || "java",
@@ -28,16 +28,21 @@ const config = {
   web: {
     port: parseInt(process.env.WEB_PORT || "3000", 10),
   },
-  // Add auto-shutdown configuration
+  // Auto-shutdown configuration
   autoShutdown: {
     enabled: process.env.AUTO_SHUTDOWN_ENABLED === "true",
-    timeout: parseInt(process.env.AUTO_SHUTDOWN_TIMEOUT || "1", 10), // Default 1 minutes
+    timeout: parseInt(process.env.AUTO_SHUTDOWN_TIMEOUT || "30", 10), // Default 30 minutes
+  },
+  // Wake-on-demand configuration
+  wakeOnDemand: {
+    enabled: process.env.WAKE_ON_DEMAND_ENABLED === "true",
+    serverPort: parseInt(process.env.SERVER_PORT || "25565", 10),
   },
 };
 
 const queryClient = new QueryClient(config.query.host, config.query.port);
 
-// When initializing the server manager, pass the queryClient and inactivity timeout
+// Initialize the server manager with updated options
 const serverManager = new MinecraftServerManager({
   serverPath: config.server.path,
   startScript: config.server.startScript,
@@ -47,7 +52,9 @@ const serverManager = new MinecraftServerManager({
   inactivityTimeout: config.autoShutdown.enabled
     ? config.autoShutdown.timeout
     : 0,
-  queryClient: queryClient, // Pass the queryClient instance
+  queryClient: queryClient,
+  serverPort: config.wakeOnDemand.serverPort,
+  wakeOnDemandEnabled: config.wakeOnDemand.enabled,
 });
 
 const rconClient = new RconClient(
@@ -307,6 +314,34 @@ pause`;
       enabled: serverManager.getInactivityTimeout() > 0,
       timeout: serverManager.getInactivityTimeout(),
     };
+  })
+  .get("/api/wake-on-demand", () => {
+    return {
+      enabled: serverManager.isWakeOnDemandEnabled(),
+    };
+  })
+
+  .post("/api/wake-on-demand", async ({ body }) => {
+    const { enabled } = body as { enabled: boolean };
+
+    try {
+      await serverManager.setWakeOnDemandEnabled(enabled);
+
+      return {
+        success: true,
+        enabled: serverManager.isWakeOnDemandEnabled(),
+        message: enabled
+          ? "Wake-on-demand enabled. Server will start automatically when a client tries to connect."
+          : "Wake-on-demand disabled.",
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Error setting wake-on-demand: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
   })
 
   .listen(config.web.port);

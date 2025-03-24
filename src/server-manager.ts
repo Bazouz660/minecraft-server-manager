@@ -3,6 +3,7 @@ import { spawn, ChildProcess } from "child_process";
 import { join } from "path";
 import fs from "fs";
 import { QueryClient } from "./protocols/query";
+import { MinecraftListener } from "./protocols/server-listener";
 
 export class MinecraftServerManager {
   private serverProcess: ChildProcess | null = null;
@@ -19,6 +20,11 @@ export class MinecraftServerManager {
   private inactivityCheckInterval: NodeJS.Timeout | null = null;
   private queryClient: QueryClient | null = null;
 
+  // Wake-on-demand properties
+  private serverPort: number;
+  private wakeOnDemandEnabled: boolean = false;
+  private serverListener: MinecraftListener | null = null;
+
   constructor(options: {
     serverPath: string;
     startScript?: string | null;
@@ -27,6 +33,8 @@ export class MinecraftServerManager {
     maxMemory?: string;
     inactivityTimeout?: number;
     queryClient?: QueryClient;
+    serverPort?: number;
+    wakeOnDemandEnabled?: boolean;
   }) {
     this.serverPath = options.serverPath;
     this.startScript = options.startScript || null;
@@ -35,6 +43,20 @@ export class MinecraftServerManager {
     this.maxMemory = options.maxMemory || "2G";
     this.inactivityTimeout = options.inactivityTimeout || 0;
     this.queryClient = options.queryClient || null;
+    this.serverPort = options.serverPort || 25565;
+    this.wakeOnDemandEnabled = options.wakeOnDemandEnabled || false;
+
+    // Initialize the server listener for wake-on-demand
+    this.serverListener = new MinecraftListener(this.serverPort, async () => {
+      if (!this.isRunning() && !this.isShuttingDown()) {
+        return this.start();
+      }
+    });
+
+    // Start the listener if wake-on-demand is enabled
+    if (this.wakeOnDemandEnabled) {
+      this.startListener();
+    }
   }
 
   public isRunning(): boolean {
@@ -45,10 +67,47 @@ export class MinecraftServerManager {
     return this.shutdownInProgress;
   }
 
+  public isWakeOnDemandEnabled(): boolean {
+    return this.wakeOnDemandEnabled;
+  }
+
+  public async setWakeOnDemandEnabled(enabled: boolean): Promise<void> {
+    this.wakeOnDemandEnabled = enabled;
+
+    if (enabled && !this.isRunning()) {
+      await this.startListener();
+    } else if (!enabled && this.serverListener?.isRunning()) {
+      this.stopListener();
+    }
+  }
+
+  private async startListener(): Promise<void> {
+    if (!this.serverListener || this.isRunning()) {
+      return;
+    }
+
+    try {
+      await this.serverListener.start();
+      console.log("Wake-on-demand listener started");
+    } catch (error) {
+      console.error("Failed to start wake-on-demand listener:", error);
+    }
+  }
+
+  private stopListener(): void {
+    if (this.serverListener) {
+      this.serverListener.stop();
+      console.log("Wake-on-demand listener stopped");
+    }
+  }
+
   public async start(): Promise<boolean> {
     if (this.isRunning()) {
       return true; // Server is already running
     }
+
+    // Stop the listener if it's running
+    this.stopListener();
 
     // Check if the server directory exists
     if (!fs.existsSync(this.serverPath)) {
@@ -135,6 +194,11 @@ exit
         console.log(`Server process exited with code ${code}`);
         this.serverProcess = null;
         this.stopInactivityChecker(); // Ensure checker is stopped when server stops
+
+        // Restart the listener if wake-on-demand is enabled
+        if (this.wakeOnDemandEnabled) {
+          this.startListener();
+        }
       });
 
       // Start the inactivity checker if enabled
@@ -148,6 +212,12 @@ exit
       return true;
     } catch (error) {
       console.error("Failed to start Minecraft server:", error);
+
+      // If we failed to start, restart the listener
+      if (this.wakeOnDemandEnabled) {
+        this.startListener();
+      }
+
       return false;
     }
   }
@@ -155,6 +225,12 @@ exit
   public async stop(): Promise<boolean> {
     if (!this.isRunning() || !this.serverProcess) {
       this.shutdownInProgress = false;
+
+      // Ensure listener is running if wake-on-demand is enabled
+      if (this.wakeOnDemandEnabled) {
+        await this.startListener();
+      }
+
       return true; // Server is not running
     }
 
@@ -191,6 +267,12 @@ exit
             this.serverProcess = null;
           }
           this.shutdownInProgress = false;
+
+          // Start listener if wake-on-demand is enabled
+          if (this.wakeOnDemandEnabled) {
+            this.startListener();
+          }
+
           resolve(true);
         }, 30000); // 30 seconds timeout
 
@@ -198,6 +280,12 @@ exit
           clearTimeout(timeout);
           this.serverProcess = null;
           this.shutdownInProgress = false;
+
+          // Start listener if wake-on-demand is enabled
+          if (this.wakeOnDemandEnabled) {
+            this.startListener();
+          }
+
           resolve(true);
         });
       });
@@ -209,6 +297,12 @@ exit
         this.serverProcess = null;
       }
       this.shutdownInProgress = false;
+
+      // Start listener if wake-on-demand is enabled
+      if (this.wakeOnDemandEnabled) {
+        this.startListener();
+      }
+
       return false;
     }
   }
