@@ -2,6 +2,7 @@
 import { spawn, ChildProcess } from "child_process";
 import { join } from "path";
 import fs from "fs";
+import { QueryClient } from "./protocols/query";
 
 export class MinecraftServerManager {
   private serverProcess: ChildProcess | null = null;
@@ -12,18 +13,28 @@ export class MinecraftServerManager {
   private maxMemory: string;
   private shutdownInProgress: boolean = false;
 
+  // Auto-shutdown properties
+  private emptyStartTime: number | null = null;
+  private inactivityTimeout: number = 0; // Time in minutes before shutdown (0 = disabled)
+  private inactivityCheckInterval: NodeJS.Timeout | null = null;
+  private queryClient: QueryClient | null = null;
+
   constructor(options: {
     serverPath: string;
     startScript?: string | null;
     javaPath?: string;
     serverJarFile?: string;
     maxMemory?: string;
+    inactivityTimeout?: number;
+    queryClient?: QueryClient;
   }) {
     this.serverPath = options.serverPath;
     this.startScript = options.startScript || null;
     this.javaPath = options.javaPath || "java";
     this.serverJarFile = options.serverJarFile || "server.jar";
     this.maxMemory = options.maxMemory || "2G";
+    this.inactivityTimeout = options.inactivityTimeout || 0;
+    this.queryClient = options.queryClient || null;
   }
 
   public isRunning(): boolean {
@@ -123,7 +134,16 @@ exit
       this.serverProcess.on("close", (code) => {
         console.log(`Server process exited with code ${code}`);
         this.serverProcess = null;
+        this.stopInactivityChecker(); // Ensure checker is stopped when server stops
       });
+
+      // Start the inactivity checker if enabled
+      if (this.inactivityTimeout > 0 && this.queryClient) {
+        // Give the server some time to start up before checking player count
+        setTimeout(() => {
+          this.startInactivityChecker();
+        }, 60000); // Wait 1 minute for server to fully start
+      }
 
       return true;
     } catch (error) {
@@ -141,6 +161,9 @@ exit
     try {
       // Set shutdown flag
       this.shutdownInProgress = true;
+
+      // Stop the inactivity checker
+      this.stopInactivityChecker();
 
       // Send 'stop' command to the server's stdin
       this.serverProcess.stdin?.write("stop\n");
@@ -187,6 +210,114 @@ exit
       }
       this.shutdownInProgress = false;
       return false;
+    }
+  }
+
+  // Auto-shutdown methods
+  public getInactivityTimeout(): number {
+    return this.inactivityTimeout;
+  }
+
+  public setInactivityTimeout(minutes: number): void {
+    const wasEnabled = this.inactivityTimeout > 0;
+    this.inactivityTimeout = minutes;
+
+    if (this.inactivityTimeout > 0 && this.isRunning()) {
+      if (this.inactivityCheckInterval) {
+        this.stopInactivityChecker();
+      }
+      this.startInactivityChecker();
+      console.log(`Auto-shutdown set to ${minutes} minutes of inactivity`);
+    } else if (wasEnabled) {
+      this.stopInactivityChecker();
+      console.log("Auto-shutdown disabled");
+    }
+  }
+
+  public startInactivityChecker(): void {
+    if (
+      this.inactivityTimeout <= 0 ||
+      !this.queryClient ||
+      this.inactivityCheckInterval
+    ) {
+      return; // Auto-shutdown is disabled or already running
+    }
+
+    this.emptyStartTime = null; // Reset the timer
+
+    // Check every minute
+    this.inactivityCheckInterval = setInterval(async () => {
+      await this.checkInactivity();
+    }, 60000); // Check every minute
+
+    console.log(
+      `Started inactivity checker (timeout: ${this.inactivityTimeout} minutes)`
+    );
+  }
+
+  public stopInactivityChecker(): void {
+    if (this.inactivityCheckInterval) {
+      clearInterval(this.inactivityCheckInterval);
+      this.inactivityCheckInterval = null;
+      this.emptyStartTime = null;
+      console.log("Stopped inactivity checker");
+    }
+  }
+
+  private async checkInactivity(): Promise<void> {
+    if (
+      !this.isRunning() ||
+      !this.queryClient ||
+      this.inactivityTimeout <= 0 ||
+      this.shutdownInProgress
+    ) {
+      return;
+    }
+
+    try {
+      // Get server stats to check player count
+      const stats = await this.queryClient.getBasicStats();
+      const playerCount = stats.numPlayers || 0;
+
+      console.log(`[AUTO-SHUTDOWN] Current player count: ${playerCount}`);
+
+      if (playerCount === 0) {
+        // Server is empty
+        if (this.emptyStartTime === null) {
+          // Just became empty, start the timer
+          this.emptyStartTime = Date.now();
+          console.log(
+            "[AUTO-SHUTDOWN] Server is empty, starting inactivity timer"
+          );
+        } else {
+          // Check if timeout has been reached
+          const emptyTime = (Date.now() - this.emptyStartTime) / 60000; // Convert to minutes
+
+          console.log(
+            `[AUTO-SHUTDOWN] Server has been empty for ${emptyTime.toFixed(
+              2
+            )} minutes`
+          );
+
+          if (emptyTime >= this.inactivityTimeout) {
+            console.log(
+              `[AUTO-SHUTDOWN] Timeout reached (${this.inactivityTimeout} minutes), shutting down server`
+            );
+            await this.stop();
+          }
+        }
+      } else {
+        // Server has players, reset the timer
+        if (this.emptyStartTime !== null) {
+          console.log(
+            "[AUTO-SHUTDOWN] Players joined, resetting inactivity timer"
+          );
+          this.emptyStartTime = null;
+        }
+      }
+    } catch (error) {
+      console.error("[AUTO-SHUTDOWN] Error checking server inactivity:", error);
+      // Don't count errors as activity - if there's a temporary error, we still want to shut down eventually
     }
   }
 }

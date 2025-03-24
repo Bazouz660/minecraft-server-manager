@@ -11,7 +11,7 @@ const config = {
   server: {
     path:
       process.env.MC_SERVER_PATH || "C:\\games\\Rlcraft Dregora Server - Copie",
-    startScript: process.env.MC_START_SCRIPT || "start.bat", // Add support for start script
+    startScript: process.env.MC_START_SCRIPT || "start.bat",
     jarFile: process.env.MC_SERVER_JAR || "server.jar",
     javaPath: process.env.JAVA_PATH || "java",
     maxMemory: process.env.MC_MAX_MEMORY || "2G",
@@ -28,15 +28,26 @@ const config = {
   web: {
     port: parseInt(process.env.WEB_PORT || "3000", 10),
   },
+  // Add auto-shutdown configuration
+  autoShutdown: {
+    enabled: process.env.AUTO_SHUTDOWN_ENABLED === "true",
+    timeout: parseInt(process.env.AUTO_SHUTDOWN_TIMEOUT || "1", 10), // Default 1 minutes
+  },
 };
 
-// Initialize server manager and clients
+const queryClient = new QueryClient(config.query.host, config.query.port);
+
+// When initializing the server manager, pass the queryClient and inactivity timeout
 const serverManager = new MinecraftServerManager({
   serverPath: config.server.path,
   startScript: config.server.startScript,
   javaPath: config.server.javaPath,
   serverJarFile: config.server.jarFile,
   maxMemory: config.server.maxMemory,
+  inactivityTimeout: config.autoShutdown.enabled
+    ? config.autoShutdown.timeout
+    : 0,
+  queryClient: queryClient, // Pass the queryClient instance
 });
 
 const rconClient = new RconClient(
@@ -44,8 +55,6 @@ const rconClient = new RconClient(
   config.rcon.port,
   config.rcon.password
 );
-
-const queryClient = new QueryClient(config.query.host, config.query.port);
 
 import { examineStartBat, fixStartBat } from "./start-bat-helper";
 import { readFileSync, existsSync, writeFileSync } from "fs";
@@ -57,71 +66,6 @@ const app = new Elysia()
     // Serve the simple HTML directly
     try {
       const filePath = "./src/public/index.html";
-
-      if (!existsSync(filePath)) {
-        // If the file doesn't exist, return a simple HTML page
-        return new Response(
-          `
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>Minecraft Server Manager</title>
-            <style>
-              body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-              button { padding: 10px; margin: 5px; }
-              .response { background-color: #f0f0f0; padding: 10px; margin-top: 10px; border-radius: 5px; }
-            </style>
-          </head>
-          <body>
-            <h1>Minecraft Server Manager</h1>
-            <p>Simple fallback interface:</p>
-            <div>
-              <button id="statusBtn">Check Status</button>
-              <button id="startBtn">Start Server</button>
-              <button id="stopBtn">Stop Server</button>
-              <div id="statusResponse" class="response">Status will appear here...</div>
-            </div>
-            <script>
-              document.getElementById('statusBtn').addEventListener('click', async () => {
-                try {
-                  const response = await fetch('/api/status');
-                  const data = await response.json();
-                  document.getElementById('statusResponse').textContent = JSON.stringify(data, null, 2);
-                } catch (error) {
-                  document.getElementById('statusResponse').textContent = 'Error: ' + error.message;
-                }
-              });
-              
-              document.getElementById('startBtn').addEventListener('click', async () => {
-                try {
-                  const response = await fetch('/api/start', { method: 'POST' });
-                  const data = await response.json();
-                  document.getElementById('statusResponse').textContent = JSON.stringify(data, null, 2);
-                } catch (error) {
-                  document.getElementById('statusResponse').textContent = 'Error: ' + error.message;
-                }
-              });
-              
-              document.getElementById('stopBtn').addEventListener('click', async () => {
-                try {
-                  const response = await fetch('/api/stop', { method: 'POST' });
-                  const data = await response.json();
-                  document.getElementById('statusResponse').textContent = JSON.stringify(data, null, 2);
-                } catch (error) {
-                  document.getElementById('statusResponse').textContent = 'Error: ' + error.message;
-                }
-              });
-            </script>
-          </body>
-          </html>
-        `,
-          {
-            headers: {
-              "Content-Type": "text/html",
-            },
-          }
-        );
-      }
 
       const html = readFileSync(filePath, "utf-8");
       return new Response(html, {
@@ -336,6 +280,33 @@ pause`;
         }`,
       };
     }
+  })
+
+  // Add these API endpoints after your existing endpoints
+  .get("/api/auto-shutdown", () => {
+    return {
+      enabled: serverManager.getInactivityTimeout() > 0,
+      timeout: serverManager.getInactivityTimeout(),
+    };
+  })
+
+  .post("/api/auto-shutdown", async ({ body }) => {
+    const { enabled, timeout } = body as { enabled: boolean; timeout: number };
+
+    // Validate timeout (between 1 minute and 24 hours)
+    const validTimeout = Math.max(
+      1,
+      Math.min(parseInt(String(timeout), 10) || 30, 1440)
+    );
+
+    // Update the server manager
+    serverManager.setInactivityTimeout(enabled ? validTimeout : 0);
+
+    return {
+      success: true,
+      enabled: serverManager.getInactivityTimeout() > 0,
+      timeout: serverManager.getInactivityTimeout(),
+    };
   })
 
   .listen(config.web.port);
