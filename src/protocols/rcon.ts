@@ -24,7 +24,7 @@ export class RconClient extends EventEmitter {
     {
       resolve: (value: string) => void;
       reject: (error: Error) => void;
-      timer: NodeJS.Timeout;
+      timer: ReturnType<typeof setTimeout>;
       buffer: string;
     }
   > = new Map();
@@ -179,8 +179,10 @@ export class RconClient extends EventEmitter {
     if (!this.isConnected()) {
       try {
         await this.connect();
-      } catch (error) {
-        throw new Error(`Failed to connect to RCON server: ${error.message}`);
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : "Unknown error";
+        throw new Error(`Failed to connect to RCON server: ${errorMessage}`);
       }
     }
 
@@ -208,9 +210,13 @@ export class RconClient extends EventEmitter {
         try {
           await this.connect();
           return this.sendCommand(command, retries - 1);
-        } catch (reconnectError) {
+        } catch (reconnectError: unknown) {
+          const errorMessage =
+            reconnectError instanceof Error
+              ? reconnectError.message
+              : "Unknown error";
           throw new Error(
-            `Failed to reconnect to RCON server: ${reconnectError.message}`
+            `Failed to reconnect to RCON server: ${errorMessage}`
           );
         }
       }
@@ -242,9 +248,11 @@ export class RconClient extends EventEmitter {
       await this.sendPacket(requestId, packet);
       this.authenticated = true;
       return true;
-    } catch (error) {
+    } catch (error: unknown) {
       this.authenticated = false;
-      throw new Error(`RCON authentication failed: ${error.message}`);
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      throw new Error(`RCON authentication failed: ${errorMessage}`);
     }
   }
 
@@ -281,7 +289,7 @@ export class RconClient extends EventEmitter {
       });
 
       // Send the packet
-      this.socket.write(packet, (error) => {
+      this.socket!.write(packet, (error) => {
         if (error) {
           if (this.pendingResponses.has(requestId)) {
             clearTimeout(this.pendingResponses.get(requestId)!.timer);

@@ -1,6 +1,6 @@
 // src/services/server-state.ts
 import { EventEmitter } from "events";
-import { QueryClient, ServerStats } from "../protocols/query";
+import { QueryClient, type ServerStats } from "../protocols/query";
 
 export type ServerStatus = "offline" | "starting" | "online" | "stopping";
 
@@ -23,7 +23,7 @@ export interface ServerState {
 export class ServerStateManager extends EventEmitter {
   private currentState: ServerState;
   private queryClient: QueryClient;
-  private monitorInterval: NodeJS.Timeout | null = null;
+  private monitorInterval: ReturnType<typeof setInterval> | null = null;
   private checkIntervalMs: number;
   private inactivityTimeoutMins: number;
   // Constants for better state management

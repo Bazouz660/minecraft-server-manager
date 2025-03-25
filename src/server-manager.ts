@@ -3,7 +3,8 @@ import { EventEmitter } from "events";
 import { ServerProcessManager } from "./services/server-process";
 import { ServerStateManager } from "./services/server-state";
 import { MinecraftServerListener } from "./services/server-listener";
-import { QueryClient, ServerStats, FullServerStats } from "./protocols/query";
+import { QueryClient } from "./protocols/query";
+import type { ServerStats, FullServerStats } from "./protocols/query";
 import { RconClient } from "./protocols/rcon";
 
 export interface ServerManagerOptions {
@@ -61,8 +62,8 @@ export class MinecraftServerManager extends EventEmitter {
     };
 
     // Set feature flags
-    this.wakeOnDemandEnabled = this.options.wakeOnDemandEnabled;
-    this.autoRestartOnCrash = this.options.autoRestartOnCrash;
+    this.wakeOnDemandEnabled = this.options.wakeOnDemandEnabled || false;
+    this.autoRestartOnCrash = this.options.autoRestartOnCrash || false;
 
     // Create instances of our services with better logging configuration
     this.queryClient = new QueryClient(

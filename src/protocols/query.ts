@@ -264,9 +264,10 @@ export class QueryClient extends EventEmitter {
         this.serverKnownOffline = false;
 
         return result;
-      } catch (error) {
+      } catch (error: unknown) {
+        const err = error as Error;
         // Handle different error types differently
-        if (error.message === "Query request timed out") {
+        if (err.message === "Query request timed out") {
           // This is normal when server is offline - only log it if not already known offline
           if (!this.serverKnownOffline) {
             this.log(
@@ -283,7 +284,7 @@ export class QueryClient extends EventEmitter {
           }
         } else {
           // This is a more serious error - always log it
-          this.log("error", `Query error: ${error.message}`);
+          this.log("error", `Query error: ${err.message}`);
         }
 
         // Track failed query for rate limiting
@@ -304,13 +305,14 @@ export class QueryClient extends EventEmitter {
         // Return offline status
         return { online: false };
       }
-    } catch (error) {
+    } catch (error: unknown) {
       // Track failed query for rate limiting
       this.trackQueryResult(false);
 
+      const err = error as Error;
       this.log(
         "error",
-        `Failed to initialize socket for query: ${error.message}`
+        `Failed to initialize socket for query: ${err.message}`
       );
       return { online: false };
     } finally {
@@ -360,9 +362,10 @@ export class QueryClient extends EventEmitter {
         this.serverKnownOffline = false;
 
         return result;
-      } catch (error) {
+      } catch (error: unknown) {
+        const err = error as Error;
         // Handle different error types differently
-        if (error.message === "Query request timed out") {
+        if (err.message === "Query request timed out") {
           // Only log it if not already known offline
           if (!this.serverKnownOffline) {
             this.log(
@@ -374,7 +377,7 @@ export class QueryClient extends EventEmitter {
           }
         } else {
           // More serious error - always log it
-          this.log("error", `Full query error: ${error.message}`);
+          this.log("error", `Full query error: ${err.message}`);
         }
 
         // Track failed query for rate limiting
@@ -395,13 +398,14 @@ export class QueryClient extends EventEmitter {
         // Return offline status
         return { online: false };
       }
-    } catch (error) {
+    } catch (error: unknown) {
       // Track failed query for rate limiting
       this.trackQueryResult(false);
 
+      const err = error as Error;
       this.log(
         "error",
-        `Failed to initialize socket for full query: ${error.message}`
+        `Failed to initialize socket for full query: ${err.message}`
       );
       return { online: false };
     } finally {
@@ -441,8 +445,9 @@ export class QueryClient extends EventEmitter {
         throw new Error("Invalid challenge token (not a number)");
       }
       return token;
-    } catch (error) {
-      throw new Error(`Failed to parse challenge token: ${error.message}`);
+    } catch (error: unknown) {
+      const err = error as Error;
+      throw new Error(`Failed to parse challenge token: ${err.message}`);
     }
   }
 
@@ -531,6 +536,11 @@ export class QueryClient extends EventEmitter {
       }, this.connectionTimeout);
 
       // Set up listener
+      if (!this.socket) {
+        clearTimeout(timer);
+        reject(new Error("Socket became null after validation"));
+        return;
+      }
       this.socket.once("message", messageHandler);
 
       // Send the request
@@ -671,8 +681,9 @@ export class QueryClient extends EventEmitter {
         hostPort,
         hostIp,
       };
-    } catch (error) {
-      this.log("error", `Error parsing basic stats: ${error.message}`);
+    } catch (error: unknown) {
+      const err = error as Error;
+      this.log("error", `Error parsing basic stats: ${err.message}`);
       // Return a default response
       return { online: true };
     }
@@ -748,8 +759,9 @@ export class QueryClient extends EventEmitter {
         maxPlayers: parseInt(kvPairs.maxplayers || "0", 10) || 0,
         players,
       };
-    } catch (error) {
-      this.log("error", `Error parsing full stats: ${error.message}`);
+    } catch (error: unknown) {
+      const err = error as Error;
+      this.log("error", `Error parsing full stats: ${err.message}`);
       // Return a default response
       return { online: true };
     }

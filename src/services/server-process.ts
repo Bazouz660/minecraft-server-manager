@@ -261,8 +261,9 @@ exit
       // Check if process is still responsive by checking its exit code
       // Exit code is null if the process is still running
       if (this.serverProcess.exitCode !== null) {
+        const exitCode = this.serverProcess.exitCode;
         console.log(
-          `Process appears to have exited with code ${this.serverProcess.exitCode} but we missed the event`
+          `Process appears to have exited with code ${exitCode} but we missed the event`
         );
         clearInterval(heartbeatInterval);
 
@@ -270,14 +271,14 @@ exit
         this.serverProcess = null;
         this.isShuttingDown = false;
         this.cleanupTempFiles();
-        this.emit("stopped", this.serverProcess.exitCode);
+        this.emit("stopped", exitCode);
       }
     }, 10000); // Check every 10 seconds
 
     // Log output from the server
     this.serverProcess.stdout?.on("data", (data) => {
       const lines = data.toString().trim().split("\n");
-      lines.forEach((line) => {
+      lines.forEach((line: string) => {
         console.log(`[SERVER]: ${line}`);
         this.emit("serverOutput", line);
 
@@ -295,7 +296,7 @@ exit
 
     this.serverProcess.stderr?.on("data", (data) => {
       const lines = data.toString().trim().split("\n");
-      lines.forEach((line) => {
+      lines.forEach((line: string) => {
         console.error(`[SERVER ERROR]: ${line}`);
         this.emit("serverError", line);
       });
