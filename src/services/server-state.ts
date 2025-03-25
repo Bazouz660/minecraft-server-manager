@@ -18,6 +18,8 @@ export interface ServerState {
   lastStatusChange?: Date;
   lastErrorCount?: number;
   startupTimeoutExpired?: boolean;
+  // Add this new field
+  crashDetected?: boolean;
 }
 
 export class ServerStateManager extends EventEmitter {
@@ -123,6 +125,20 @@ export class ServerStateManager extends EventEmitter {
    */
   public getInactivityTimeout(): number {
     return this.inactivityTimeoutMins;
+  }
+
+  public setCrashDetected(crashed: boolean): void {
+    this.currentState.crashDetected = crashed;
+
+    if (crashed) {
+      // When a crash is detected, set state to offline
+      if (this.currentState.status !== "offline") {
+        this.setServerStatus("offline");
+      }
+    } else {
+      // Clear crash state
+      this.currentState.crashDetected = false;
+    }
   }
 
   /**

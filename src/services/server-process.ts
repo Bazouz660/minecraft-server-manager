@@ -127,20 +127,97 @@ export class ServerProcessManager extends EventEmitter {
   }
 
   /**
-   * Force kill the server process
+   * Force kill the server process with enhanced checks
    */
   public forceKill(): void {
     if (this.serverProcess) {
-      try {
-        this.serverProcess.kill("SIGKILL");
-      } catch (error) {
-        console.error("Error force killing server process:", error);
+      console.log("Force killing server process");
+
+      // First try to send a key press in case it's waiting for input
+      if (this.serverProcess.stdin) {
+        try {
+          // Send enter key
+          this.serverProcess.stdin.write("\n");
+
+          // Give it a moment to process the key press
+          setTimeout(() => {
+            this.performForcedKill();
+          }, 500);
+        } catch (error) {
+          console.error("Error sending enter key before force kill:", error);
+          this.performForcedKill();
+        }
+      } else {
+        this.performForcedKill();
       }
-      this.serverProcess = null;
-      this.isShuttingDown = false;
-      this.cleanupTempFiles();
-      this.emit("stopped");
     }
+  }
+
+  /**
+   * Perform the actual forced kill with multiple strategies
+   */
+  private performForcedKill(): void {
+    if (!this.serverProcess) return;
+
+    try {
+      // Try killing with SIGTERM first
+      this.serverProcess.kill("SIGTERM");
+
+      // If process still alive after 2 seconds, use SIGKILL
+      setTimeout(() => {
+        if (this.serverProcess && !this.serverProcess.killed) {
+          try {
+            console.log("Process still alive after SIGTERM, using SIGKILL");
+            this.serverProcess.kill("SIGKILL");
+          } catch (error) {
+            console.error("Error using SIGKILL:", error);
+          }
+
+          // On Windows, if still alive, try taskkill
+          setTimeout(() => {
+            if (
+              this.serverProcess &&
+              !this.serverProcess.killed &&
+              this.serverProcess.pid
+            ) {
+              try {
+                const { spawn } = require("child_process");
+                console.log("Process still alive, trying taskkill (Windows)");
+
+                // Use taskkill /F /PID [pid] for Windows
+                spawn("taskkill", [
+                  "/F",
+                  "/PID",
+                  this.serverProcess.pid.toString(),
+                ]);
+              } catch (error) {
+                console.error("Error using taskkill:", error);
+              }
+            }
+
+            // Clean up regardless
+            this.finalizeKill();
+          }, 1000);
+        } else {
+          this.finalizeKill();
+        }
+      }, 2000);
+    } catch (error) {
+      console.error("Error in force kill process:", error);
+      this.finalizeKill();
+    }
+  }
+
+  /**
+   * Clean up after kill attempts
+   */
+  private finalizeKill(): void {
+    this.serverProcess = null;
+    this.isShuttingDown = false;
+    this.cleanupTempFiles();
+
+    // Make sure we emit stopped if not already done
+    this.emit("stopped", -1);
   }
 
   /**
@@ -235,13 +312,28 @@ exit
     return true;
   }
 
-  /**
-   * Setup handlers for the server process with improved monitoring
-   */
+  // src/services/server-process.ts
+  // Modify the setupProcessHandlers method to detect crashes
+
   private setupProcessHandlers(): void {
     if (!this.serverProcess) {
       return;
     }
+
+    // Add crash detection
+    let crashDetected = false;
+    const crashPatterns = [
+      /Unable to launch/i,
+      /Caused by:/i,
+      /Exception in thread/i,
+      /Error:/i,
+      /crashed with exit code/i,
+      /FATAL:/i,
+      /java\.lang\.[A-Za-z]+Error/i,
+      /java\.lang\.[A-Za-z]+Exception/i,
+      /Appuyez sur une touche pour continuer/i, // French "Press any key to continue"
+      /Press any key to continue/i,
+    ];
 
     // Add a heartbeat timer that periodically checks if the process is still responding
     const heartbeatInterval = setInterval(() => {
@@ -273,6 +365,16 @@ exit
         this.cleanupTempFiles();
         this.emit("stopped", exitCode);
       }
+
+      // If a crash was detected but the process is still running (waiting for key press),
+      // force kill it to prevent state machine inconsistency
+      if (crashDetected && this.serverProcess) {
+        console.log(
+          "Server crash detected but process still running, force killing process"
+        );
+        this.forceKill();
+        crashDetected = false;
+      }
     }, 10000); // Check every 10 seconds
 
     // Log output from the server
@@ -291,6 +393,27 @@ exit
         ) {
           this.emit("serverFullyStarted");
         }
+
+        // Check for crash patterns in server output
+        if (!crashDetected) {
+          for (const pattern of crashPatterns) {
+            if (pattern.test(line)) {
+              console.log(`Crash detected: ${line}`);
+              crashDetected = true;
+              this.emit("serverCrashed", line);
+
+              // If the process is waiting for key press, send an enter key
+              if (this.serverProcess && this.serverProcess.stdin) {
+                try {
+                  this.serverProcess.stdin.write("\n");
+                } catch (error) {
+                  console.error("Error sending enter key after crash:", error);
+                }
+              }
+              break;
+            }
+          }
+        }
       });
     });
 
@@ -299,6 +422,18 @@ exit
       lines.forEach((line: string) => {
         console.error(`[SERVER ERROR]: ${line}`);
         this.emit("serverError", line);
+
+        // Check for crash patterns in error output
+        if (!crashDetected) {
+          for (const pattern of crashPatterns) {
+            if (pattern.test(line)) {
+              console.log(`Crash detected in stderr: ${line}`);
+              crashDetected = true;
+              this.emit("serverCrashed", line);
+              break;
+            }
+          }
+        }
       });
     });
 
@@ -315,6 +450,7 @@ exit
     this.serverProcess.on("error", (error) => {
       console.error("Server process error:", error);
       this.emit("processError", error);
+      crashDetected = true;
     });
 
     // Let listeners know the server has started

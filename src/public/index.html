@@ -760,6 +760,7 @@
     <div>
       <button id="diagnosticsBtn" class="secondary">Run Diagnostics</button>
       <button id="forceOfflineBtn" class="danger">Force Status Offline</button>
+      <button id="resetStateBtn" class="danger">Reset Server State</button>
     </div>
     <div id="diagnosticsResponse" class="response">
       Diagnostics results will appear here...
@@ -772,6 +773,35 @@
     const diagnosticsBtn = document.getElementById("diagnosticsBtn");
     const forceOfflineBtn = document.getElementById("forceOfflineBtn");
     const diagnosticsResponse = document.getElementById("diagnosticsResponse");
+    const resetStateBtn = document.getElementById("resetStateBtn");
+
+    // Reset server state
+    async function resetServerState() {
+      if (
+        !confirm(
+          "Are you sure you want to reset the server state? This will force kill any running process and reset the state to offline. Only use this when the server appears to be stuck."
+        )
+      ) {
+        return;
+      }
+
+      try {
+        resetStateBtn.disabled = true;
+        diagnosticsResponse.textContent = "Resetting server state...";
+
+        const response = await fetch("/api/reset-state", { method: "POST" });
+        const data = await response.json();
+
+        diagnosticsResponse.textContent = data.message;
+
+        // Check status after a moment
+        setTimeout(checkServerStatus, 2000);
+      } catch (error) {
+        diagnosticsResponse.textContent = `Error resetting server state: ${error.message}`;
+      } finally {
+        resetStateBtn.disabled = false;
+      }
+    }
 
     // Run diagnostics
     async function runDiagnostics() {
@@ -909,5 +939,6 @@
     // Add event listeners
     diagnosticsBtn.addEventListener("click", runDiagnostics);
     forceOfflineBtn.addEventListener("click", forceOfflineStatus);
+    resetStateBtn.addEventListener("click", resetServerState);
   </script>
 </html>

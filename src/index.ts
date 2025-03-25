@@ -458,6 +458,26 @@ pause`;
     };
   })
 
+  // Reset server state (for when it gets stuck)
+  .post("/api/reset-state", async () => {
+    try {
+      const success = await serverManager.resetServerState();
+      return {
+        success,
+        message: success
+          ? "Server state has been reset to offline"
+          : "Failed to reset server state",
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Error resetting server state: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+  })
+
   .listen(config.web.port);
 
 console.log(

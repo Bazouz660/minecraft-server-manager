@@ -106,6 +106,67 @@ export class MinecraftServerManager extends EventEmitter {
     if (this.wakeOnDemandEnabled) {
       this.startWakeOnDemand();
     }
+
+    // Add a special event handler for crash detection that works across components
+    this.processManager.on("serverCrashed", (errorMessage: string) => {
+      console.log("Server crash detected in process manager, updating state");
+
+      // Mark the server as crashed in the state manager
+      this.stateManager.setCrashDetected(true);
+
+      // Set the server status to offline
+      this.stateManager.setServerStatus("offline");
+
+      // Tell the query client the server is offline to reduce error noise
+      this.updateQueryClientServerState(false);
+
+      // Make sure process is terminated
+      this.processManager.forceKill();
+
+      // Emit the crash event for UI notification
+      this.emit("serverCrashed", errorMessage);
+
+      // If auto-restart on crash is enabled, attempt restart
+      if (this.autoRestartOnCrash) {
+        console.log("Auto-restart on crash is enabled, scheduling restart");
+
+        // Wait 5 seconds before attempting restart
+        setTimeout(() => {
+          console.log("Attempting auto-restart after crash");
+          this.stateManager.setCrashDetected(false); // Clear crash detection
+          this.start().catch((err) => {
+            console.error("Failed to auto-restart server after crash:", err);
+          });
+        }, 5000);
+      }
+    });
+  }
+
+  /**
+   * Reset server state to offline and kill any hanging process
+   * This is useful when the server gets stuck in an inconsistent state
+   */
+  public async resetServerState(): Promise<boolean> {
+    console.log("Manually resetting server state");
+
+    // Force kill any running server process
+    if (this.processManager.isRunning()) {
+      this.processManager.forceKill();
+    }
+
+    // Clear crash detection if it was set
+    this.stateManager.setCrashDetected(false);
+
+    // Set server status to offline
+    this.stateManager.setServerStatus("offline");
+
+    // Tell query client server is offline
+    this.updateQueryClientServerState(false);
+
+    // Wait a moment for everything to settle
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    return true;
   }
 
   /**
@@ -174,6 +235,11 @@ export class MinecraftServerManager extends EventEmitter {
   public getServerState() {
     const currentState = this.stateManager.getState();
 
+    // If crash was detected, keep the state as offline regardless of process state
+    if (currentState.crashDetected) {
+      return currentState;
+    }
+
     // If the server is in transition (starting/stopping), ensure the process state is considered
     if (currentState.status === "starting") {
       // If the process isn't running but state is "starting",
@@ -231,7 +297,8 @@ export class MinecraftServerManager extends EventEmitter {
         this.stateManager.setServerStatus("offline");
         return this.stateManager.getState();
       }
-    } else if (currentState.status === "offline") {
+    } // Modify the offline state check
+    else if (currentState.status === "offline") {
       // IMPORTANT: Only correct state if we're SURE the process is running AND responsive
       // This will prevent the loop of state changes
       if (this.processManager.isRunning()) {
@@ -539,6 +606,16 @@ export class MinecraftServerManager extends EventEmitter {
    * Update the server state handler for status changes
    */
   private setupEventHandlers(): void {
+    // Process manager events
+    this.processManager.on("started", () => {
+      console.log("Server process started");
+      // Ensure state is set to starting
+      this.stateManager.setServerStatus("starting");
+      // Tell query client server is starting up
+      this.updateQueryClientServerState(false);
+      this.emit("serverStarted");
+    });
+
     // Process manager events
     this.processManager.on("started", () => {
       console.log("Server process started");
