@@ -64,10 +64,11 @@ export class MinecraftServerManager extends EventEmitter {
     this.wakeOnDemandEnabled = this.options.wakeOnDemandEnabled;
     this.autoRestartOnCrash = this.options.autoRestartOnCrash;
 
-    // Create instances of our services
+    // Create instances of our services with better logging configuration
     this.queryClient = new QueryClient(
       this.options.queryHost!,
-      this.options.queryPort!
+      this.options.queryPort!,
+      { logLevel: "info" } // Only show info and higher level logs
     );
 
     this.rconClient = new RconClient(
@@ -103,6 +104,15 @@ export class MinecraftServerManager extends EventEmitter {
     // Start server listener if wake-on-demand is enabled
     if (this.wakeOnDemandEnabled) {
       this.startWakeOnDemand();
+    }
+  }
+
+  /**
+   * Update the query client's known server state
+   */
+  private updateQueryClientServerState(online: boolean): void {
+    if (this.queryClient) {
+      this.queryClient.setServerKnownState(online);
     }
   }
 
@@ -155,183 +165,6 @@ export class MinecraftServerManager extends EventEmitter {
     return (
       this.stateManager.isServerStopping() || this.processManager.isInShutdown()
     );
-  }
-
-  /**
-   * Start the server
-   */
-  public async start(): Promise<boolean> {
-    if (this.isRunning() || this.pendingStart) {
-      return true; // Already running or starting
-    }
-
-    this.pendingStart = true;
-
-    try {
-      // Stop the listener if it's running
-      await this.stopWakeOnDemand();
-
-      // Set server status to starting - do this BEFORE starting the process
-      this.stateManager.setServerStatus("starting");
-
-      // Start the process
-      const success = await this.processManager.start();
-
-      if (!success) {
-        this.stateManager.setServerStatus("offline");
-
-        // Restart listener if wake-on-demand is enabled
-        if (this.wakeOnDemandEnabled) {
-          await this.startWakeOnDemand();
-        }
-      } else {
-        // Ensure the state manager knows the server is starting
-        // This reinforces the starting state even if a query check happened between
-        // the first state update and the process actually starting
-        this.stateManager.setServerStatus("starting");
-      }
-
-      this.pendingStart = false;
-      return success;
-    } catch (error) {
-      console.error("Error starting server:", error);
-      this.stateManager.setServerStatus("offline");
-
-      // Restart listener if wake-on-demand is enabled
-      if (this.wakeOnDemandEnabled) {
-        await this.startWakeOnDemand();
-      }
-
-      this.pendingStart = false;
-      return false;
-    }
-  }
-
-  /**
-   * Stop the server
-   */
-  public async stop(): Promise<boolean> {
-    if (!this.isRunning()) {
-      return true; // Already stopped
-    }
-
-    try {
-      // Set server status to stopping BEFORE stopping the process
-      this.stateManager.setServerStatus("stopping");
-
-      // Stop the process
-      const success = await this.processManager.stop();
-
-      // If the server is still running, force kill it
-      if (this.processManager.isRunning()) {
-        this.processManager.forceKill();
-      } else {
-        // If the process is confirmed stopped, update the state
-        this.stateManager.setServerStatus("offline");
-      }
-
-      // Start listener if wake-on-demand is enabled
-      if (this.wakeOnDemandEnabled) {
-        await this.startWakeOnDemand();
-      }
-
-      return success;
-    } catch (error) {
-      console.error("Error stopping server:", error);
-
-      // If the server is still running, force kill it
-      if (this.processManager.isRunning()) {
-        this.processManager.forceKill();
-      }
-
-      // Update the state to offline since we forced the process to stop
-      this.stateManager.setServerStatus("offline");
-
-      // Start listener if wake-on-demand is enabled
-      if (this.wakeOnDemandEnabled) {
-        await this.startWakeOnDemand();
-      }
-
-      return false;
-    }
-  }
-
-  /**
-   * Send a command to the server via RCON
-   */
-  public async sendCommand(command: string): Promise<string> {
-    if (!this.isRunning()) {
-      throw new Error("Server is not running");
-    }
-
-    try {
-      // First try RCON
-      try {
-        await this.rconClient.connect();
-        const response = await this.rconClient.sendCommand(command);
-        await this.rconClient.disconnect();
-        return response;
-      } catch (rconError) {
-        console.warn(
-          "RCON command failed, falling back to process stdin:",
-          rconError
-        );
-
-        // Fall back to process stdin
-        const success = this.processManager.sendCommand(command);
-        if (!success) {
-          throw new Error("Failed to send command to server");
-        }
-        return "Command sent (no response available)";
-      }
-    } catch (error) {
-      console.error("Error sending command:", error);
-      throw error;
-    }
-  }
-
-  /**
-   * Get basic server statistics
-   */
-  public async getBasicStats(): Promise<ServerStats> {
-    if (!this.isRunning()) {
-      return { online: false };
-    }
-
-    try {
-      return await this.queryClient.getBasicStats();
-    } catch (error) {
-      console.error("Error getting basic stats:", error);
-
-      // If the server is running but we can't query it, return a basic online status
-      if (this.processManager.isRunning()) {
-        return { online: true };
-      }
-
-      return { online: false };
-    }
-  }
-
-  /**
-   * Get detailed server statistics
-   */
-  public async getFullStats(): Promise<FullServerStats> {
-    if (!this.isRunning()) {
-      return { online: false };
-    }
-
-    try {
-      return await this.queryClient.getFullStats();
-    } catch (error) {
-      console.error("Error getting full stats:", error);
-
-      // If the server is running but we can't query it, return a basic online status
-      if (this.processManager.isRunning()) {
-        return { online: true };
-      }
-
-      return { online: false };
-    }
   }
 
   /**
@@ -435,6 +268,204 @@ export class MinecraftServerManager extends EventEmitter {
   }
 
   /**
+   * Start the server with improved error handling
+   */
+  public async start(): Promise<boolean> {
+    if (this.isRunning() || this.pendingStart) {
+      return true; // Already running or starting
+    }
+
+    this.pendingStart = true;
+
+    try {
+      // Stop the listener if it's running
+      await this.stopWakeOnDemand();
+
+      // Set server status to starting - do this BEFORE starting the process
+      this.stateManager.setServerStatus("starting");
+
+      // Tell the query client that we're starting up (prevent error noise during startup)
+      this.updateQueryClientServerState(false);
+
+      // Start the process
+      const success = await this.processManager.start();
+
+      if (!success) {
+        this.stateManager.setServerStatus("offline");
+
+        // Update query client state
+        this.updateQueryClientServerState(false);
+
+        // Restart listener if wake-on-demand is enabled
+        if (this.wakeOnDemandEnabled) {
+          await this.startWakeOnDemand();
+        }
+      } else {
+        // Ensure the state manager knows the server is starting
+        // This reinforces the starting state even if a query check happened between
+        // the first state update and the process actually starting
+        this.stateManager.setServerStatus("starting");
+
+        // We're in starting state, but query might still fail until fully started
+        this.updateQueryClientServerState(false);
+      }
+
+      this.pendingStart = false;
+      return success;
+    } catch (error) {
+      console.error("Error starting server:", error);
+      this.stateManager.setServerStatus("offline");
+
+      // Update query client state
+      this.updateQueryClientServerState(false);
+
+      // Restart listener if wake-on-demand is enabled
+      if (this.wakeOnDemandEnabled) {
+        await this.startWakeOnDemand();
+      }
+
+      this.pendingStart = false;
+      return false;
+    }
+  }
+
+  /**
+   * Stop the server with improved error handling
+   */
+  public async stop(): Promise<boolean> {
+    if (!this.isRunning()) {
+      return true; // Already stopped
+    }
+
+    try {
+      // Set server status to stopping BEFORE stopping the process
+      this.stateManager.setServerStatus("stopping");
+
+      // Tell the query client that we're stopping (prevent error noise during shutdown)
+      this.updateQueryClientServerState(false);
+
+      // Stop the process
+      const success = await this.processManager.stop();
+
+      // If the server is still running, force kill it
+      if (this.processManager.isRunning()) {
+        this.processManager.forceKill();
+      } else {
+        // If the process is confirmed stopped, update the state
+        this.stateManager.setServerStatus("offline");
+
+        // Update query client state
+        this.updateQueryClientServerState(false);
+      }
+
+      // Start listener if wake-on-demand is enabled
+      if (this.wakeOnDemandEnabled) {
+        await this.startWakeOnDemand();
+      }
+
+      return success;
+    } catch (error) {
+      console.error("Error stopping server:", error);
+
+      // If the server is still running, force kill it
+      if (this.processManager.isRunning()) {
+        this.processManager.forceKill();
+      }
+
+      // Update the state to offline since we forced the process to stop
+      this.stateManager.setServerStatus("offline");
+
+      // Update query client state
+      this.updateQueryClientServerState(false);
+
+      // Start listener if wake-on-demand is enabled
+      if (this.wakeOnDemandEnabled) {
+        await this.startWakeOnDemand();
+      }
+
+      return false;
+    }
+  }
+
+  /**
+   * Send a command to the server via RCON
+   */
+  public async sendCommand(command: string): Promise<string> {
+    if (!this.isRunning()) {
+      throw new Error("Server is not running");
+    }
+
+    try {
+      // First try RCON
+      try {
+        await this.rconClient.connect();
+        const response = await this.rconClient.sendCommand(command);
+        await this.rconClient.disconnect();
+        return response;
+      } catch (rconError) {
+        console.warn(
+          "RCON command failed, falling back to process stdin:",
+          rconError
+        );
+
+        // Fall back to process stdin
+        const success = this.processManager.sendCommand(command);
+        if (!success) {
+          throw new Error("Failed to send command to server");
+        }
+        return "Command sent (no response available)";
+      }
+    } catch (error) {
+      console.error("Error sending command:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get basic server statistics
+   */
+  public async getBasicStats(): Promise<ServerStats> {
+    if (!this.isRunning()) {
+      return { online: false };
+    }
+
+    try {
+      return await this.queryClient.getBasicStats();
+    } catch (error) {
+      console.error("Error getting basic stats:", error);
+
+      // If the server is running but we can't query it, return a basic online status
+      if (this.processManager.isRunning()) {
+        return { online: true };
+      }
+
+      return { online: false };
+    }
+  }
+
+  /**
+   * Get detailed server statistics
+   */
+  public async getFullStats(): Promise<FullServerStats> {
+    if (!this.isRunning()) {
+      return { online: false };
+    }
+
+    try {
+      return await this.queryClient.getFullStats();
+    } catch (error) {
+      console.error("Error getting full stats:", error);
+
+      // If the server is running but we can't query it, return a basic online status
+      if (this.processManager.isRunning()) {
+        return { online: true };
+      }
+
+      return { online: false };
+    }
+  }
+
+  /**
    * Extra diagnostic method to check server connectivity
    */
   public async checkServerConnectivity(): Promise<{
@@ -504,7 +535,7 @@ export class MinecraftServerManager extends EventEmitter {
   }
 
   /**
-   * Set up event handlers for the various components with improved coordination
+   * Update the server state handler for status changes
    */
   private setupEventHandlers(): void {
     // Process manager events
@@ -512,6 +543,8 @@ export class MinecraftServerManager extends EventEmitter {
       console.log("Server process started");
       // Ensure state is set to starting
       this.stateManager.setServerStatus("starting");
+      // Tell query client server is starting up
+      this.updateQueryClientServerState(false);
       this.emit("serverStarted");
     });
 
@@ -520,6 +553,8 @@ export class MinecraftServerManager extends EventEmitter {
       console.log("Server detected as fully started from logs");
       // This helps update the state faster than waiting for query
       this.stateManager.setServerStatus("online");
+      // Tell query client server is now online
+      this.updateQueryClientServerState(true);
       this.emit("serverFullyStarted");
     });
 
@@ -528,6 +563,8 @@ export class MinecraftServerManager extends EventEmitter {
 
       // Always update state to offline when the process stops
       this.stateManager.setServerStatus("offline");
+      // Tell query client server is offline
+      this.updateQueryClientServerState(false);
 
       // Check if this was an unexpected stop
       if (!this.stateManager.isServerStopping() && this.autoRestartOnCrash) {
@@ -551,6 +588,9 @@ export class MinecraftServerManager extends EventEmitter {
     // State manager events
     this.stateManager.on("statusChanged", (state) => {
       console.log(`Server status changed to ${state.status}`);
+
+      // Update query client with current state to reduce error noise
+      this.updateQueryClientServerState(state.status === "online");
 
       // Cross-validate with process manager
       if (state.status === "offline" && this.processManager.isRunning()) {

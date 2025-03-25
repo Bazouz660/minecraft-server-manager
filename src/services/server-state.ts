@@ -372,8 +372,8 @@ export class ServerStateManager extends EventEmitter {
         }
       }
     } catch (error) {
-      console.error("Error checking server state:", error);
-
+      // Don't log the error directly here since the QueryClient will already log it properly
+      // Just increment the consecutive errors counter
       this.consecutiveErrors++;
       this.currentState.lastErrorCount = this.consecutiveErrors;
 

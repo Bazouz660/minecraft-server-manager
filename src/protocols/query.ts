@@ -35,12 +35,74 @@ export class QueryClient extends EventEmitter {
   private consecutiveFailures: number = 0;
   private failureBackoffMs: number = 0; // Increases with consecutive failures
 
-  constructor(host: string, port: number) {
+  // Add a known server state to prevent excessive error logging
+  private serverKnownOffline: boolean = false;
+  private lastServerStateCheck: number = 0;
+
+  // Add logging level for clarity
+  private logLevel: "debug" | "info" | "warn" | "error" = "info";
+
+  constructor(
+    host: string,
+    port: number,
+    options?: { logLevel?: "debug" | "info" | "warn" | "error" }
+  ) {
     super();
     this.host = host;
     this.port = port;
+
+    // Set log level from options if provided
+    if (options?.logLevel) {
+      this.logLevel = options.logLevel;
+    }
+
     // Generate a valid session ID (only use the lower 4 bits of each byte as per protocol)
     this.sessionId = Math.floor(Math.random() * 0x0f0f0f0f) & 0x0f0f0f0f;
+  }
+
+  /**
+   * Log a message at the appropriate level
+   */
+  private log(
+    level: "debug" | "info" | "warn" | "error",
+    message: string
+  ): void {
+    const levels = { debug: 0, info: 1, warn: 2, error: 3 };
+
+    // Only log if the message level is >= configured log level
+    if (levels[level] >= levels[this.logLevel]) {
+      switch (level) {
+        case "debug":
+          console.log(`[QUERY DEBUG] ${message}`);
+          break;
+        case "info":
+          console.log(`[QUERY INFO] ${message}`);
+          break;
+        case "warn":
+          console.warn(`[QUERY WARN] ${message}`);
+          break;
+        case "error":
+          console.error(`[QUERY ERROR] ${message}`);
+          break;
+      }
+    }
+  }
+
+  /**
+   * Set the known server state to reduce error noise
+   */
+  public setServerKnownState(online: boolean): void {
+    this.serverKnownOffline = !online;
+    this.lastServerStateCheck = Date.now();
+
+    if (!online) {
+      this.log(
+        "info",
+        "Server marked as known offline, will suppress timeout errors"
+      );
+    } else {
+      this.log("info", "Server marked as known online, will show all errors");
+    }
   }
 
   /**
@@ -60,7 +122,7 @@ export class QueryClient extends EventEmitter {
             this.socket.removeAllListeners(); // Remove all listeners first
             this.socket.close();
           } catch (e) {
-            console.log("Ignoring error when closing existing socket:", e);
+            this.log("debug", "Ignoring error when closing existing socket");
             // Ignore errors on close
           }
           this.socket = null;
@@ -71,7 +133,7 @@ export class QueryClient extends EventEmitter {
 
         // Set up error handler
         this.socket.on("error", (err) => {
-          console.error("QueryClient socket error:", err);
+          this.log("error", `Socket error: ${err.message}`);
           this.isReady = false;
           this.emit("error", err);
         });
@@ -103,7 +165,7 @@ export class QueryClient extends EventEmitter {
         this.socket.removeAllListeners(); // Remove all listeners before closing
         this.socket.close();
       } catch (e) {
-        console.log("Ignoring error when closing socket:", e);
+        this.log("debug", "Ignoring error when closing socket");
         // Ignore errors on close
       }
       this.socket = null;
@@ -135,7 +197,8 @@ export class QueryClient extends EventEmitter {
 
     // If we have too many consecutive failures, reduce retries
     if (this.consecutiveFailures > 5) {
-      console.log(
+      this.log(
+        "info",
         `Too many consecutive query failures (${this.consecutiveFailures}), limiting retries`
       );
       return false;
@@ -166,12 +229,12 @@ export class QueryClient extends EventEmitter {
   }
 
   /**
-   * Get basic server statistics with improved socket management
+   * Get basic server statistics with improved socket management and error handling
    */
   public async getBasicStats(retries = this.maxRetries): Promise<ServerStats> {
     // Check if we should limit the request based on rate limiting
     if (retries < this.maxRetries && !this.shouldRetry("basic")) {
-      console.log("Skipping query retry due to rate limiting");
+      this.log("debug", "Skipping query retry due to rate limiting");
       return { online: false };
     }
 
@@ -197,14 +260,38 @@ export class QueryClient extends EventEmitter {
         // Track successful query
         this.trackQueryResult(true);
 
+        // Server is now known to be online
+        this.serverKnownOffline = false;
+
         return result;
       } catch (error) {
+        // Handle different error types differently
+        if (error.message === "Query request timed out") {
+          // This is normal when server is offline - only log it if not already known offline
+          if (!this.serverKnownOffline) {
+            this.log(
+              "info",
+              "Query timed out - server may be offline or not responding"
+            );
+
+            // If we've had multiple timeouts, consider the server offline
+            if (this.consecutiveFailures > 2) {
+              this.serverKnownOffline = true;
+            }
+          } else {
+            this.log("debug", "Query timed out (server known offline)");
+          }
+        } else {
+          // This is a more serious error - always log it
+          this.log("error", `Query error: ${error.message}`);
+        }
+
         // Track failed query for rate limiting
         this.trackQueryResult(false);
 
         // If we have retries left and should retry, try again
         if (retries > 0 && this.shouldRetry("basic")) {
-          console.log(`Retrying query (${retries} retries left)...`);
+          this.log("debug", `Retrying query (${retries} retries left)...`);
 
           // Make sure the socket is properly closed before retrying
           if (socketCreated) {
@@ -214,15 +301,17 @@ export class QueryClient extends EventEmitter {
           return this.getBasicStats(retries - 1);
         }
 
-        // If server may be offline, return a basic offline status
-        console.error("Failed to get server stats:", error);
+        // Return offline status
         return { online: false };
       }
     } catch (error) {
       // Track failed query for rate limiting
       this.trackQueryResult(false);
 
-      console.error("Failed to initialize socket for query:", error);
+      this.log(
+        "error",
+        `Failed to initialize socket for query: ${error.message}`
+      );
       return { online: false };
     } finally {
       // Always ensure the socket is closed after the operation
@@ -234,14 +323,14 @@ export class QueryClient extends EventEmitter {
   }
 
   /**
-   * Get full server statistics with improved socket management
+   * Get full server statistics with improved socket management and error handling
    */
   public async getFullStats(
     retries = this.maxRetries
   ): Promise<FullServerStats> {
     // Check if we should limit the request based on rate limiting
     if (retries < this.maxRetries && !this.shouldRetry("full")) {
-      console.log("Skipping full query retry due to rate limiting");
+      this.log("debug", "Skipping full query retry due to rate limiting");
       return { online: false };
     }
 
@@ -267,14 +356,33 @@ export class QueryClient extends EventEmitter {
         // Track successful query
         this.trackQueryResult(true);
 
+        // Server is now known to be online
+        this.serverKnownOffline = false;
+
         return result;
       } catch (error) {
+        // Handle different error types differently
+        if (error.message === "Query request timed out") {
+          // Only log it if not already known offline
+          if (!this.serverKnownOffline) {
+            this.log(
+              "info",
+              "Full query timed out - server may be offline or not responding"
+            );
+          } else {
+            this.log("debug", "Full query timed out (server known offline)");
+          }
+        } else {
+          // More serious error - always log it
+          this.log("error", `Full query error: ${error.message}`);
+        }
+
         // Track failed query for rate limiting
         this.trackQueryResult(false);
 
         // If we have retries left and should retry, try again
         if (retries > 0 && this.shouldRetry("full")) {
-          console.log(`Retrying full query (${retries} retries left)...`);
+          this.log("debug", `Retrying full query (${retries} retries left)...`);
 
           // Make sure the socket is properly closed before retrying
           if (socketCreated) {
@@ -284,15 +392,17 @@ export class QueryClient extends EventEmitter {
           return this.getFullStats(retries - 1);
         }
 
-        // If server may be offline, return a basic offline status
-        console.error("Failed to get full server stats:", error);
+        // Return offline status
         return { online: false };
       }
     } catch (error) {
       // Track failed query for rate limiting
       this.trackQueryResult(false);
 
-      console.error("Failed to initialize socket for full query:", error);
+      this.log(
+        "error",
+        `Failed to initialize socket for full query: ${error.message}`
+      );
       return { online: false };
     } finally {
       // Always ensure the socket is closed after the operation
@@ -400,7 +510,7 @@ export class QueryClient extends EventEmitter {
   }
 
   /**
-   * Send a request to the server and get a response
+   * Send a request to the server and get a response with improved error handling
    */
   private async sendRequest(request: Buffer): Promise<Buffer> {
     if (!this.socket || !this.isReady) {
@@ -414,7 +524,7 @@ export class QueryClient extends EventEmitter {
         resolve(message);
       };
 
-      // Set up a timeout
+      // Set up a timeout with a more specific error
       const timer = setTimeout(() => {
         this.socket?.removeListener("message", messageHandler);
         reject(new Error("Query request timed out"));
@@ -434,7 +544,8 @@ export class QueryClient extends EventEmitter {
           if (error) {
             clearTimeout(timer);
             this.socket?.removeListener("message", messageHandler);
-            reject(error);
+            // More specific error message
+            reject(new Error(`Socket send error: ${error.message}`));
           }
         }
       );
@@ -561,7 +672,7 @@ export class QueryClient extends EventEmitter {
         hostIp,
       };
     } catch (error) {
-      console.error("Error parsing basic stats:", error);
+      this.log("error", `Error parsing basic stats: ${error.message}`);
       // Return a default response
       return { online: true };
     }
@@ -638,7 +749,7 @@ export class QueryClient extends EventEmitter {
         players,
       };
     } catch (error) {
-      console.error("Error parsing full stats:", error);
+      this.log("error", `Error parsing full stats: ${error.message}`);
       // Return a default response
       return { online: true };
     }
