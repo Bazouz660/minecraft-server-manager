@@ -2,12 +2,11 @@
 import { Elysia } from "elysia";
 import { staticPlugin } from "@elysiajs/static";
 import { MinecraftServerManager } from "./server-manager";
-import { RconClient } from "./protocols/rcon";
-import { QueryClient } from "./protocols/query";
 import { join } from "path";
+import { readFileSync, existsSync, writeFileSync } from "fs";
+import { examineStartBat, fixStartBat } from "./utils/start-bat-helper";
 
 // Load configuration
-// Update your config object to include wake-on-demand settings
 const config = {
   server: {
     path: process.env.MC_SERVER_PATH || "C:\\games\\Rlcraft Dregora Server",
@@ -16,56 +15,66 @@ const config = {
     javaPath: process.env.JAVA_PATH || "java",
     maxMemory: process.env.MC_MAX_MEMORY || "2G",
   },
-  rcon: {
-    host: process.env.RCON_HOST || "localhost",
-    port: parseInt(process.env.RCON_PORT || "25575", 10),
-    password: process.env.RCON_PASSWORD || "cacamerde123",
-  },
-  query: {
-    host: process.env.QUERY_HOST || "localhost",
-    port: parseInt(process.env.QUERY_PORT || "25565", 10),
+  network: {
+    rconHost: process.env.RCON_HOST || "localhost",
+    rconPort: parseInt(process.env.RCON_PORT || "25575", 10),
+    rconPassword: process.env.RCON_PASSWORD || "cacamerde123",
+    queryHost: process.env.QUERY_HOST || "localhost",
+    queryPort: parseInt(process.env.QUERY_PORT || "25565", 10),
+    serverPort: parseInt(process.env.SERVER_PORT || "25565", 10),
   },
   web: {
     port: parseInt(process.env.WEB_PORT || "3000", 10),
   },
-  // Auto-shutdown configuration
   autoShutdown: {
     enabled: process.env.AUTO_SHUTDOWN_ENABLED === "true",
     timeout: parseInt(process.env.AUTO_SHUTDOWN_TIMEOUT || "30", 10), // Default 30 minutes
   },
-  // Wake-on-demand configuration
   wakeOnDemand: {
     enabled: process.env.WAKE_ON_DEMAND_ENABLED === "true",
-    serverPort: parseInt(process.env.SERVER_PORT || "25565", 10),
+  },
+  advanced: {
+    autoRestartOnCrash: process.env.AUTO_RESTART_ON_CRASH === "true",
   },
 };
 
-const queryClient = new QueryClient(config.query.host, config.query.port);
-
-// Initialize the server manager with updated options
+// Initialize server manager
 const serverManager = new MinecraftServerManager({
+  // Server settings
   serverPath: config.server.path,
   startScript: config.server.startScript,
   javaPath: config.server.javaPath,
   serverJarFile: config.server.jarFile,
   maxMemory: config.server.maxMemory,
+
+  // Network settings
+  rconHost: config.network.rconHost,
+  rconPort: config.network.rconPort,
+  rconPassword: config.network.rconPassword,
+  queryHost: config.network.queryHost,
+  queryPort: config.network.queryPort,
+  serverPort: config.network.serverPort,
+
+  // Feature settings
   inactivityTimeout: config.autoShutdown.enabled
     ? config.autoShutdown.timeout
     : 0,
-  queryClient: queryClient,
-  serverPort: config.wakeOnDemand.serverPort,
   wakeOnDemandEnabled: config.wakeOnDemand.enabled,
+  autoRestartOnCrash: config.advanced.autoRestartOnCrash,
 });
 
-const rconClient = new RconClient(
-  config.rcon.host,
-  config.rcon.port,
-  config.rcon.password
-);
+// Handle process termination to clean up resources
+process.on("SIGINT", async () => {
+  console.log("Shutting down server manager...");
+  await serverManager.cleanup();
+  process.exit(0);
+});
 
-import { examineStartBat, fixStartBat } from "./start-bat-helper";
-import { readFileSync, existsSync, writeFileSync } from "fs";
-import { join } from "path";
+process.on("SIGTERM", async () => {
+  console.log("Shutting down server manager...");
+  await serverManager.cleanup();
+  process.exit(0);
+});
 
 // Create Elysia app
 const app = new Elysia()
@@ -73,6 +82,71 @@ const app = new Elysia()
     // Serve the simple HTML directly
     try {
       const filePath = "./src/public/index.html";
+
+      if (!existsSync(filePath)) {
+        // If the file doesn't exist, return a simple HTML page
+        return new Response(
+          `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Minecraft Server Manager</title>
+            <style>
+              body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+              button { padding: 10px; margin: 5px; }
+              .response { background-color: #f0f0f0; padding: 10px; margin-top: 10px; border-radius: 5px; }
+            </style>
+          </head>
+          <body>
+            <h1>Minecraft Server Manager</h1>
+            <p>Simple fallback interface:</p>
+            <div>
+              <button id="statusBtn">Check Status</button>
+              <button id="startBtn">Start Server</button>
+              <button id="stopBtn">Stop Server</button>
+              <div id="statusResponse" class="response">Status will appear here...</div>
+            </div>
+            <script>
+              document.getElementById('statusBtn').addEventListener('click', async () => {
+                try {
+                  const response = await fetch('/api/status');
+                  const data = await response.json();
+                  document.getElementById('statusResponse').textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                  document.getElementById('statusResponse').textContent = 'Error: ' + error.message;
+                }
+              });
+              
+              document.getElementById('startBtn').addEventListener('click', async () => {
+                try {
+                  const response = await fetch('/api/start', { method: 'POST' });
+                  const data = await response.json();
+                  document.getElementById('statusResponse').textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                  document.getElementById('statusResponse').textContent = 'Error: ' + error.message;
+                }
+              });
+              
+              document.getElementById('stopBtn').addEventListener('click', async () => {
+                try {
+                  const response = await fetch('/api/stop', { method: 'POST' });
+                  const data = await response.json();
+                  document.getElementById('statusResponse').textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                  document.getElementById('statusResponse').textContent = 'Error: ' + error.message;
+                }
+              });
+            </script>
+          </body>
+          </html>
+        `,
+          {
+            headers: {
+              "Content-Type": "text/html",
+            },
+          }
+        );
+      }
 
       const html = readFileSync(filePath, "utf-8");
       return new Response(html, {
@@ -155,7 +229,7 @@ pause`;
     }
   })
 
-  // API routes
+  // API endpoints
   .get("/api/config", () => {
     // Return a sanitized version of the configuration (without sensitive info)
     return {
@@ -163,38 +237,66 @@ pause`;
         path: config.server.path,
         startScript: config.server.startScript || "(Using direct Java launch)",
         jarFile: config.server.jarFile,
-        // Don't expose memory settings as they might be sensitive
       },
-      rcon: {
-        host: config.rcon.host,
-        port: config.rcon.port,
-        // Don't expose the password
+      network: {
+        rconHost: config.network.rconHost,
+        rconPort: config.network.rconPort,
+        queryHost: config.network.queryHost,
+        queryPort: config.network.queryPort,
+        serverPort: config.network.serverPort,
       },
-      query: {
-        host: config.query.host,
-        port: config.query.port,
+      autoShutdown: {
+        enabled: serverManager.getInactivityTimeout() > 0,
+        timeout: serverManager.getInactivityTimeout(),
+      },
+      wakeOnDemand: {
+        enabled: serverManager.isWakeOnDemandEnabled(),
+      },
+      advanced: {
+        autoRestartOnCrash: config.advanced.autoRestartOnCrash,
       },
     };
   })
 
   .get("/api/status", async () => {
-    const isRunning = serverManager.isRunning();
+    // Get the current server state which includes process and query information
+    const serverState = serverManager.getServerState();
 
-    let serverInfo = null;
-    if (isRunning) {
-      try {
-        serverInfo = await queryClient.getBasicStats();
-      } catch (error) {
-        console.error("Failed to get server stats:", error);
-        // Don't let query failure affect the status response
-        // This typically happens during shutdown
-      }
+    // Determine the actual server status based on state and process info
+    let effectiveStatus = serverState.status;
+    const isProcessRunning = serverManager.isRunning();
+    const isShuttingDown = serverManager.isShuttingDown();
+
+    // If the process is running but state doesn't reflect that, override
+    if (isProcessRunning && effectiveStatus === "offline") {
+      effectiveStatus = "starting";
+    }
+
+    // If the process is not running but state says it's online, override
+    if (!isProcessRunning && effectiveStatus === "online") {
+      effectiveStatus = "stopping";
+    }
+
+    // If we're in shutdown process, make sure status reflects that
+    if (
+      isShuttingDown &&
+      (effectiveStatus === "online" || effectiveStatus === "starting")
+    ) {
+      effectiveStatus = "stopping";
     }
 
     return {
-      isRunning,
-      serverInfo,
-      shutdownInProgress: serverManager.isShuttingDown(),
+      status: effectiveStatus,
+      isRunning: isProcessRunning,
+      isShuttingDown: isShuttingDown,
+      serverInfo: serverState.stats,
+      uptime: serverState.uptime,
+      playerPeakCount: serverState.playerPeakCount,
+      emptyDuration: serverState.emptyDuration,
+      // Add additional information to help with debugging
+      stateLastUpdated: serverState.lastStatusChange,
+      lastCheck: serverState.lastCheck,
+      errorCount: serverState.lastErrorCount || 0,
     };
   })
 
@@ -256,10 +358,7 @@ pause`;
     }
 
     try {
-      await rconClient.connect();
-      const response = await rconClient.sendCommand(command);
-      await rconClient.disconnect();
-
+      const response = await serverManager.sendCommand(command);
       return { success: true, response };
     } catch (error) {
       return {
@@ -277,7 +376,7 @@ pause`;
     }
 
     try {
-      const info = await queryClient.getFullStats();
+      const info = await serverManager.getFullStats();
       return { success: true, info };
     } catch (error) {
       return {
@@ -289,7 +388,6 @@ pause`;
     }
   })
 
-  // Add these API endpoints after your existing endpoints
   .get("/api/auto-shutdown", () => {
     return {
       enabled: serverManager.getInactivityTimeout() > 0,
@@ -315,6 +413,7 @@ pause`;
       timeout: serverManager.getInactivityTimeout(),
     };
   })
+
   .get("/api/wake-on-demand", () => {
     return {
       enabled: serverManager.isWakeOnDemandEnabled(),
@@ -342,6 +441,21 @@ pause`;
         }`,
       };
     }
+  })
+
+  .get("/api/diagnostics", async () => {
+    // Check server connectivity
+    const connectivity = await serverManager.checkServerConnectivity();
+
+    // Get current state
+    const state = serverManager.getServerState();
+
+    return {
+      success: true,
+      connectivity,
+      state,
+      message: `Diagnostics completed at ${new Date().toISOString()}`,
+    };
   })
 
   .listen(config.web.port);

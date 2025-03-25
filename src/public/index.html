@@ -616,4 +616,298 @@
       fetchWakeOnDemandSettings(); // Add this line
     });
   </script>
+  <script>
+    // Add this to your script section in index.html
+
+    // Update the UI based on server status
+    function updateUIBasedOnStatus(data) {
+      // Update status text and classes
+      const statusDisplay = document.getElementById("statusResponse");
+
+      // Format the status message in a more readable way
+      let statusMessage = "";
+
+      switch (data.status) {
+        case "online":
+          statusMessage = "✅ Server is ONLINE";
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+          sendBtn.disabled = false;
+          getInfoBtn.disabled = false;
+          break;
+        case "offline":
+          statusMessage = "❌ Server is OFFLINE";
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+          sendBtn.disabled = true;
+          getInfoBtn.disabled = true;
+          break;
+        case "starting":
+          statusMessage = "🔄 Server is STARTING UP...";
+          startBtn.disabled = true;
+          stopBtn.disabled = false; // Allow stopping during startup
+          sendBtn.disabled = true;
+          getInfoBtn.disabled = true;
+          break;
+        case "stopping":
+          statusMessage = "🔄 Server is SHUTTING DOWN...";
+          startBtn.disabled = true;
+          stopBtn.disabled = true;
+          sendBtn.disabled = true;
+          getInfoBtn.disabled = true;
+          break;
+        default:
+          statusMessage = `Unknown status: ${data.status}`;
+          break;
+      }
+
+      // Add server information if available
+      let serverDetails = "";
+      if (data.serverInfo) {
+        serverDetails += "\n\nServer Details:";
+        if (data.serverInfo.motd)
+          serverDetails += `\n- MOTD: ${data.serverInfo.motd}`;
+        if (data.serverInfo.numPlayers !== undefined)
+          serverDetails += `\n- Players: ${data.serverInfo.numPlayers}/${
+            data.serverInfo.maxPlayers || "?"
+          }`;
+        if (data.serverInfo.map)
+          serverDetails += `\n- Map: ${data.serverInfo.map}`;
+      }
+
+      // Add uptime if available
+      if (data.uptime !== undefined && data.uptime !== null) {
+        const hours = Math.floor(data.uptime / 3600);
+        const minutes = Math.floor((data.uptime % 3600) / 60);
+        const seconds = data.uptime % 60;
+        serverDetails += `\n- Uptime: ${hours}h ${minutes}m ${seconds}s`;
+      }
+
+      // Add player peak if available
+      if (data.playerPeakCount) {
+        serverDetails += `\n- Peak Players: ${data.playerPeakCount}`;
+      }
+
+      // Add empty time if relevant
+      if (data.emptyDuration && data.status === "online") {
+        const emptyMinutes = Math.floor(data.emptyDuration / 60);
+        const emptySeconds = data.emptyDuration % 60;
+        serverDetails += `\n- Empty for: ${emptyMinutes}m ${emptySeconds}s`;
+      }
+
+      // Add last check time
+      if (data.lastCheck) {
+        const lastCheckTime = new Date(data.lastCheck);
+        serverDetails += `\n\nLast checked: ${lastCheckTime.toLocaleTimeString()}`;
+      }
+
+      // Set the formatted status message
+      statusDisplay.textContent = statusMessage + serverDetails;
+    }
+
+    // Check server status and update UI
+    async function checkServerStatus() {
+      try {
+        statusBtn.disabled = true;
+        statusResponse.textContent = "Checking server status...";
+
+        const response = await fetch("/api/status");
+        const data = await response.json();
+
+        // Update the UI based on server status
+        updateUIBasedOnStatus(data);
+
+        // Store the last known status for continuity
+        localStorage.setItem("lastServerStatus", JSON.stringify(data));
+      } catch (error) {
+        statusResponse.textContent = `Error checking status: ${error.message}`;
+
+        // Try to use last known status if available
+        const lastStatus = localStorage.getItem("lastServerStatus");
+        if (lastStatus) {
+          try {
+            const parsedStatus = JSON.parse(lastStatus);
+            statusResponse.textContent = `Error checking status: ${
+              error.message
+            }\n\nUsing last known status from ${new Date(
+              parsedStatus.lastCheck
+            ).toLocaleTimeString()}`;
+            updateUIBasedOnStatus(parsedStatus);
+          } catch (e) {
+            // If parsing fails, just show the error
+          }
+        }
+      } finally {
+        statusBtn.disabled = false;
+      }
+    }
+
+    // Add this to your initialization code
+    document.addEventListener("DOMContentLoaded", () => {
+      fetchServerConfig();
+      checkServerStatus();
+      fetchAutoShutdownSettings();
+      fetchWakeOnDemandSettings();
+
+      // Set up periodic status checking (every 10 seconds)
+      setInterval(checkServerStatus, 10000);
+    });
+  </script>
+
+  <!-- Add this section to your index.html file, after the other sections -->
+  <div class="section">
+    <h2>Diagnostics</h2>
+    <div>
+      <button id="diagnosticsBtn" class="secondary">Run Diagnostics</button>
+      <button id="forceOfflineBtn" class="danger">Force Status Offline</button>
+    </div>
+    <div id="diagnosticsResponse" class="response">
+      Diagnostics results will appear here...
+    </div>
+  </div>
+
+  <!-- Add this JavaScript to the end of your existing <script> section -->
+  <script>
+    // Add these element references with your other element references
+    const diagnosticsBtn = document.getElementById("diagnosticsBtn");
+    const forceOfflineBtn = document.getElementById("forceOfflineBtn");
+    const diagnosticsResponse = document.getElementById("diagnosticsResponse");
+
+    // Run diagnostics
+    async function runDiagnostics() {
+      try {
+        diagnosticsBtn.disabled = true;
+        diagnosticsResponse.textContent = "Running diagnostics...";
+
+        const response = await fetch("/api/diagnostics");
+        const data = await response.json();
+
+        // Format the diagnostics report
+        let report = "DIAGNOSTICS REPORT\n";
+        report += `Timestamp: ${new Date().toLocaleString()}\n\n`;
+
+        report += "CONNECTIVITY:\n";
+        report += `- Process Running: ${
+          data.connectivity.processRunning ? "✅" : "❌"
+        }\n`;
+        report += `- Process Responsive: ${
+          data.connectivity.processResponsive ? "✅" : "❌"
+        }\n`;
+        report += `- Query Responding: ${
+          data.connectivity.queryResponding ? "✅" : "❌"
+        }\n\n`;
+
+        report += "STATE INFORMATION:\n";
+        report += `- Current Status: ${data.state.status}\n`;
+
+        if (data.state.lastStatusChange) {
+          const lastChange = new Date(data.state.lastStatusChange);
+          const changeAgo = Math.floor(
+            (Date.now() - lastChange.getTime()) / 1000
+          );
+          report += `- Last Status Change: ${lastChange.toLocaleTimeString()} (${changeAgo} seconds ago)\n`;
+        }
+
+        if (data.state.startTime) {
+          const startTime = new Date(data.state.startTime);
+          const runningFor = Math.floor(
+            (Date.now() - startTime.getTime()) / 1000
+          );
+          report += `- Start Time: ${startTime.toLocaleTimeString()} (running for ${runningFor} seconds)\n`;
+        }
+
+        if (data.state.lastErrorCount !== undefined) {
+          report += `- Error Count: ${data.state.lastErrorCount}\n`;
+        }
+
+        if (data.state.startupTimeoutExpired !== undefined) {
+          report += `- Startup Timeout Expired: ${
+            data.state.startupTimeoutExpired ? "Yes" : "No"
+          }\n`;
+        }
+
+        report += `\nSTATE MISMATCH DETECTION:\n`;
+        const isStateMismatch =
+          (data.connectivity.processRunning &&
+            data.state.status === "offline") ||
+          (!data.connectivity.processRunning &&
+            (data.state.status === "online" ||
+              data.state.status === "starting"));
+
+        if (isStateMismatch) {
+          report += `⚠️ STATE MISMATCH DETECTED: Process running=${data.connectivity.processRunning} but state=${data.state.status}\n`;
+          report += `Try using the "Force Status Offline" button to reset the state if needed.\n`;
+        } else {
+          report += `✅ No state mismatch detected.\n`;
+        }
+
+        // Display recommendation
+        report += `\nRECOMMENDATION:\n`;
+        if (
+          !data.connectivity.processRunning &&
+          data.state.status !== "offline"
+        ) {
+          report += `- Force status to offline using the button below.\n`;
+        } else if (
+          data.connectivity.processRunning &&
+          !data.connectivity.queryResponding &&
+          data.state.status === "starting"
+        ) {
+          report += `- The server process is running but not responding to queries.\n`;
+          report += `- Check if Query protocol is enabled in server.properties.\n`;
+          report += `- If the server has been starting for a long time, consider stopping and restarting it.\n`;
+        } else if (
+          data.connectivity.processRunning &&
+          data.connectivity.queryResponding &&
+          data.state.status !== "online"
+        ) {
+          report += `- Refreshing the status should update to online soon.\n`;
+        } else if (
+          !data.connectivity.processRunning &&
+          data.state.status === "offline"
+        ) {
+          report += `- System is in the correct state. You can start the server.\n`;
+        }
+
+        diagnosticsResponse.textContent = report;
+      } catch (error) {
+        diagnosticsResponse.textContent = `Error running diagnostics: ${error.message}`;
+      } finally {
+        diagnosticsBtn.disabled = false;
+      }
+    }
+
+    // Force status to offline
+    async function forceOfflineStatus() {
+      if (
+        !confirm(
+          "Are you sure you want to force the server status to offline?\nThis should only be used when the status is stuck in a wrong state."
+        )
+      ) {
+        return;
+      }
+
+      try {
+        forceOfflineBtn.disabled = true;
+        diagnosticsResponse.textContent = "Forcing server status to offline...";
+
+        // First try stopping the server
+        const stopResponse = await fetch("/api/stop", { method: "POST" });
+
+        // Wait a moment for processes to finish
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // Check status again
+        await runDiagnostics();
+      } catch (error) {
+        diagnosticsResponse.textContent = `Error forcing offline status: ${error.message}`;
+      } finally {
+        forceOfflineBtn.disabled = false;
+      }
+    }
+
+    // Add event listeners
+    diagnosticsBtn.addEventListener("click", runDiagnostics);
+    forceOfflineBtn.addEventListener("click", forceOfflineStatus);
+  </script>
 </html>

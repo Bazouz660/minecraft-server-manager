@@ -1,88 +1,645 @@
 // src/server-manager.ts
-import { spawn, ChildProcess } from "child_process";
-import { join } from "path";
-import fs from "fs";
-import { QueryClient } from "./protocols/query";
-import { MinecraftListener } from "./protocols/server-listener";
+import { EventEmitter } from "events";
+import { ServerProcessManager } from "./services/server-process";
+import { ServerStateManager } from "./services/server-state";
+import { MinecraftServerListener } from "./services/server-listener";
+import { QueryClient, ServerStats, FullServerStats } from "./protocols/query";
+import { RconClient } from "./protocols/rcon";
 
-export class MinecraftServerManager {
-  private serverProcess: ChildProcess | null = null;
-  private serverPath: string;
-  private startScript: string | null;
-  private javaPath: string;
-  private serverJarFile: string;
-  private maxMemory: string;
-  private shutdownInProgress: boolean = false;
+export interface ServerManagerOptions {
+  // Server details
+  serverPath: string;
+  startScript?: string | null;
+  javaPath?: string;
+  serverJarFile?: string;
+  maxMemory?: string;
 
-  // Auto-shutdown properties
-  private emptyStartTime: number | null = null;
-  private inactivityTimeout: number = 0; // Time in minutes before shutdown (0 = disabled)
-  private inactivityCheckInterval: NodeJS.Timeout | null = null;
-  private queryClient: QueryClient | null = null;
+  // Network settings
+  queryHost?: string;
+  queryPort?: number;
+  serverPort?: number;
+  rconHost?: string;
+  rconPort?: number;
+  rconPassword?: string;
 
-  // Wake-on-demand properties
-  private serverPort: number;
-  private wakeOnDemandEnabled: boolean = false;
-  private serverListener: MinecraftListener | null = null;
+  // Feature settings
+  inactivityTimeout?: number;
+  wakeOnDemandEnabled?: boolean;
+  autoRestartOnCrash?: boolean;
+}
 
-  constructor(options: {
-    serverPath: string;
-    startScript?: string | null;
-    javaPath?: string;
-    serverJarFile?: string;
-    maxMemory?: string;
-    inactivityTimeout?: number;
-    queryClient?: QueryClient;
-    serverPort?: number;
-    wakeOnDemandEnabled?: boolean;
-  }) {
-    this.serverPath = options.serverPath;
-    this.startScript = options.startScript || null;
-    this.javaPath = options.javaPath || "java";
-    this.serverJarFile = options.serverJarFile || "server.jar";
-    this.maxMemory = options.maxMemory || "2G";
-    this.inactivityTimeout = options.inactivityTimeout || 0;
-    this.queryClient = options.queryClient || null;
-    this.serverPort = options.serverPort || 25565;
-    this.wakeOnDemandEnabled = options.wakeOnDemandEnabled || false;
+export class MinecraftServerManager extends EventEmitter {
+  // Core services
+  private processManager: ServerProcessManager;
+  private stateManager: ServerStateManager;
+  private serverListener: MinecraftServerListener;
 
-    // Initialize the server listener for wake-on-demand
-    this.serverListener = new MinecraftListener(this.serverPort, async () => {
-      if (!this.isRunning() && !this.isShuttingDown()) {
-        return this.start();
-      }
+  // Network clients
+  private queryClient: QueryClient;
+  private rconClient: RconClient;
+
+  // Settings
+  private options: ServerManagerOptions;
+  private wakeOnDemandEnabled: boolean;
+  private autoRestartOnCrash: boolean;
+  private pendingStart: boolean = false;
+
+  constructor(options: ServerManagerOptions) {
+    super();
+
+    this.options = {
+      ...options,
+      queryHost: options.queryHost || "localhost",
+      queryPort: options.queryPort || 25565,
+      serverPort: options.serverPort || 25565,
+      rconHost: options.rconHost || "localhost",
+      rconPort: options.rconPort || 25575,
+      rconPassword: options.rconPassword || "",
+      inactivityTimeout: options.inactivityTimeout || 0,
+      wakeOnDemandEnabled: options.wakeOnDemandEnabled || false,
+      autoRestartOnCrash: options.autoRestartOnCrash || false,
+    };
+
+    // Set feature flags
+    this.wakeOnDemandEnabled = this.options.wakeOnDemandEnabled;
+    this.autoRestartOnCrash = this.options.autoRestartOnCrash;
+
+    // Create instances of our services
+    this.queryClient = new QueryClient(
+      this.options.queryHost!,
+      this.options.queryPort!
+    );
+
+    this.rconClient = new RconClient(
+      this.options.rconHost!,
+      this.options.rconPort!,
+      this.options.rconPassword!
+    );
+
+    this.processManager = new ServerProcessManager({
+      serverPath: this.options.serverPath,
+      startScript: this.options.startScript,
+      javaPath: this.options.javaPath,
+      serverJarFile: this.options.serverJarFile,
+      maxMemory: this.options.maxMemory,
     });
 
-    // Start the listener if wake-on-demand is enabled
+    this.stateManager = new ServerStateManager(
+      this.queryClient,
+      30000, // Check server state every 30 seconds
+      this.options.inactivityTimeout
+    );
+
+    this.serverListener = new MinecraftServerListener({
+      port: this.options.serverPort!,
+    });
+
+    // Wire up events
+    this.setupEventHandlers();
+
+    // Start monitoring server state
+    this.stateManager.startMonitoring();
+
+    // Start server listener if wake-on-demand is enabled
     if (this.wakeOnDemandEnabled) {
-      this.startListener();
+      this.startWakeOnDemand();
     }
   }
 
+  /**
+   * Check if the server is actually running and available
+   * This combines process status and server query status
+   */
   public isRunning(): boolean {
-    return this.serverProcess !== null && !this.serverProcess.killed;
+    // Get current state
+    const currentState = this.stateManager.getState();
+
+    // If server is in 'online' state, trust that
+    if (currentState.status === "online") {
+      return true;
+    }
+
+    // If server is in 'starting' state, check for too long in this state
+    if (currentState.status === "starting" && currentState.startTime) {
+      const startingDuration = Date.now() - currentState.startTime.getTime();
+
+      // If starting for over 5 minutes with no success, probably not going to work
+      if (
+        startingDuration > 300000 &&
+        currentState.lastErrorCount &&
+        currentState.lastErrorCount > 10
+      ) {
+        console.log(
+          "Server has been 'starting' for too long with errors, considering it not running"
+        );
+        return false;
+      }
+    }
+
+    // If server is offline or stopping, it's not running
+    if (
+      currentState.status === "offline" ||
+      currentState.status === "stopping"
+    ) {
+      return false;
+    }
+
+    // Default to process manager's state
+    return this.processManager.isRunning();
   }
 
+  /**
+   * Check if the server is in the process of shutting down
+   */
   public isShuttingDown(): boolean {
-    return this.shutdownInProgress;
+    return (
+      this.stateManager.isServerStopping() || this.processManager.isInShutdown()
+    );
   }
 
+  /**
+   * Start the server
+   */
+  public async start(): Promise<boolean> {
+    if (this.isRunning() || this.pendingStart) {
+      return true; // Already running or starting
+    }
+
+    this.pendingStart = true;
+
+    try {
+      // Stop the listener if it's running
+      await this.stopWakeOnDemand();
+
+      // Set server status to starting - do this BEFORE starting the process
+      this.stateManager.setServerStatus("starting");
+
+      // Start the process
+      const success = await this.processManager.start();
+
+      if (!success) {
+        this.stateManager.setServerStatus("offline");
+
+        // Restart listener if wake-on-demand is enabled
+        if (this.wakeOnDemandEnabled) {
+          await this.startWakeOnDemand();
+        }
+      } else {
+        // Ensure the state manager knows the server is starting
+        // This reinforces the starting state even if a query check happened between
+        // the first state update and the process actually starting
+        this.stateManager.setServerStatus("starting");
+      }
+
+      this.pendingStart = false;
+      return success;
+    } catch (error) {
+      console.error("Error starting server:", error);
+      this.stateManager.setServerStatus("offline");
+
+      // Restart listener if wake-on-demand is enabled
+      if (this.wakeOnDemandEnabled) {
+        await this.startWakeOnDemand();
+      }
+
+      this.pendingStart = false;
+      return false;
+    }
+  }
+
+  /**
+   * Stop the server
+   */
+  public async stop(): Promise<boolean> {
+    if (!this.isRunning()) {
+      return true; // Already stopped
+    }
+
+    try {
+      // Set server status to stopping BEFORE stopping the process
+      this.stateManager.setServerStatus("stopping");
+
+      // Stop the process
+      const success = await this.processManager.stop();
+
+      // If the server is still running, force kill it
+      if (this.processManager.isRunning()) {
+        this.processManager.forceKill();
+      } else {
+        // If the process is confirmed stopped, update the state
+        this.stateManager.setServerStatus("offline");
+      }
+
+      // Start listener if wake-on-demand is enabled
+      if (this.wakeOnDemandEnabled) {
+        await this.startWakeOnDemand();
+      }
+
+      return success;
+    } catch (error) {
+      console.error("Error stopping server:", error);
+
+      // If the server is still running, force kill it
+      if (this.processManager.isRunning()) {
+        this.processManager.forceKill();
+      }
+
+      // Update the state to offline since we forced the process to stop
+      this.stateManager.setServerStatus("offline");
+
+      // Start listener if wake-on-demand is enabled
+      if (this.wakeOnDemandEnabled) {
+        await this.startWakeOnDemand();
+      }
+
+      return false;
+    }
+  }
+
+  /**
+   * Send a command to the server via RCON
+   */
+  public async sendCommand(command: string): Promise<string> {
+    if (!this.isRunning()) {
+      throw new Error("Server is not running");
+    }
+
+    try {
+      // First try RCON
+      try {
+        await this.rconClient.connect();
+        const response = await this.rconClient.sendCommand(command);
+        await this.rconClient.disconnect();
+        return response;
+      } catch (rconError) {
+        console.warn(
+          "RCON command failed, falling back to process stdin:",
+          rconError
+        );
+
+        // Fall back to process stdin
+        const success = this.processManager.sendCommand(command);
+        if (!success) {
+          throw new Error("Failed to send command to server");
+        }
+        return "Command sent (no response available)";
+      }
+    } catch (error) {
+      console.error("Error sending command:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get basic server statistics
+   */
+  public async getBasicStats(): Promise<ServerStats> {
+    if (!this.isRunning()) {
+      return { online: false };
+    }
+
+    try {
+      return await this.queryClient.getBasicStats();
+    } catch (error) {
+      console.error("Error getting basic stats:", error);
+
+      // If the server is running but we can't query it, return a basic online status
+      if (this.processManager.isRunning()) {
+        return { online: true };
+      }
+
+      return { online: false };
+    }
+  }
+
+  /**
+   * Get detailed server statistics
+   */
+  public async getFullStats(): Promise<FullServerStats> {
+    if (!this.isRunning()) {
+      return { online: false };
+    }
+
+    try {
+      return await this.queryClient.getFullStats();
+    } catch (error) {
+      console.error("Error getting full stats:", error);
+
+      // If the server is running but we can't query it, return a basic online status
+      if (this.processManager.isRunning()) {
+        return { online: true };
+      }
+
+      return { online: false };
+    }
+  }
+
+  /**
+   * Get the current server state with improved accuracy
+   */
+  public getServerState() {
+    const currentState = this.stateManager.getState();
+
+    // If the server is in transition (starting/stopping), ensure the process state is considered
+    if (currentState.status === "starting") {
+      // If the process isn't running but state is "starting",
+      // we might have had an error during startup
+      if (
+        !this.processManager.isRunning() &&
+        currentState.lastStatusChange &&
+        Date.now() - currentState.lastStatusChange.getTime() > 60000
+      ) {
+        // 1 minute
+
+        console.log(
+          "Process not running but state is starting - fixing state to offline"
+        );
+        this.stateManager.setServerStatus("offline");
+        return this.stateManager.getState();
+      }
+
+      // If starting for too long without success, mark as failed
+      if (
+        currentState.startTime &&
+        Date.now() - currentState.startTime.getTime() > 300000 && // 5 minutes
+        currentState.lastErrorCount &&
+        currentState.lastErrorCount > 10
+      ) {
+        console.log(
+          "Server has been starting for too long with errors - fixing state to offline"
+        );
+        this.stateManager.setServerStatus("offline");
+        return this.stateManager.getState();
+      }
+    } else if (currentState.status === "stopping") {
+      // If the process isn't running but state is "stopping",
+      // we should update to offline
+      if (
+        !this.processManager.isRunning() &&
+        currentState.lastStatusChange &&
+        Date.now() - currentState.lastStatusChange.getTime() > 30000
+      ) {
+        // 30 seconds
+
+        console.log(
+          "Process not running but state is stopping - fixing state to offline"
+        );
+        this.stateManager.setServerStatus("offline");
+        return this.stateManager.getState();
+      }
+    } else if (currentState.status === "online") {
+      // If the state is online but the process is not running,
+      // we need to fix the state
+      if (!this.processManager.isRunning()) {
+        console.log(
+          "State is online but process is not running - fixing state to offline"
+        );
+        this.stateManager.setServerStatus("offline");
+        return this.stateManager.getState();
+      }
+    } else if (currentState.status === "offline") {
+      // IMPORTANT: Only correct state if we're SURE the process is running AND responsive
+      // This will prevent the loop of state changes
+      if (this.processManager.isRunning()) {
+        // Extra validation - check if process has been running for over 2 minutes
+        // This gives it time to start up and prevents flip-flopping states
+        if (
+          currentState.lastStatusChange &&
+          Date.now() - currentState.lastStatusChange.getTime() > 120000
+        ) {
+          // Check if the process is actually responsive or just defunct
+          this.processManager
+            .isProcessResponsive()
+            .then((responsive) => {
+              if (responsive) {
+                console.log(
+                  "Process running and responsive but state is offline - fixing state to starting"
+                );
+                this.stateManager.setServerStatus("starting");
+              } else {
+                console.log(
+                  "Process appears to be running but is not responsive - keeping state as offline"
+                );
+                // Attempt to kill the unresponsive process
+                this.processManager.forceKill();
+              }
+            })
+            .catch((error) => {
+              console.error("Error checking process responsiveness:", error);
+            });
+        }
+      }
+    }
+
+    return currentState;
+  }
+
+  /**
+   * Extra diagnostic method to check server connectivity
+   */
+  public async checkServerConnectivity(): Promise<{
+    processRunning: boolean;
+    processResponsive: boolean;
+    queryResponding: boolean;
+  }> {
+    // Check process status
+    const processRunning = this.processManager.isRunning();
+    const processResponsive = await this.processManager.isProcessResponsive();
+
+    // Try to query server directly
+    let queryResponding = false;
+    try {
+      const stats = await this.queryClient.getBasicStats();
+      queryResponding = stats.online === true;
+    } catch (error) {
+      console.error("Server connectivity check - query failed:", error);
+      queryResponding = false;
+    }
+
+    // Log the result
+    console.log(
+      `Server connectivity check: Process running=${processRunning}, ` +
+        `Process responsive=${processResponsive}, Query responding=${queryResponding}`
+    );
+
+    return {
+      processRunning,
+      processResponsive,
+      queryResponding,
+    };
+  }
+
+  /**
+   * Set the inactivity timeout for auto-shutdown
+   */
+  public setInactivityTimeout(minutes: number): void {
+    this.stateManager.setInactivityTimeout(minutes);
+  }
+
+  /**
+   * Get the current inactivity timeout
+   */
+  public getInactivityTimeout(): number {
+    return this.stateManager.getInactivityTimeout();
+  }
+
+  /**
+   * Check if wake-on-demand is enabled
+   */
   public isWakeOnDemandEnabled(): boolean {
     return this.wakeOnDemandEnabled;
   }
 
+  /**
+   * Enable or disable wake-on-demand
+   */
   public async setWakeOnDemandEnabled(enabled: boolean): Promise<void> {
     this.wakeOnDemandEnabled = enabled;
 
     if (enabled && !this.isRunning()) {
-      await this.startListener();
-    } else if (!enabled && this.serverListener?.isRunning()) {
-      this.stopListener();
+      await this.startWakeOnDemand();
+    } else if (!enabled) {
+      await this.stopWakeOnDemand();
     }
   }
 
-  private async startListener(): Promise<void> {
-    if (!this.serverListener || this.isRunning()) {
+  /**
+   * Set up event handlers for the various components with improved coordination
+   */
+  private setupEventHandlers(): void {
+    // Process manager events
+    this.processManager.on("started", () => {
+      console.log("Server process started");
+      // Ensure state is set to starting
+      this.stateManager.setServerStatus("starting");
+      this.emit("serverStarted");
+    });
+
+    // New event for server fully started detection
+    this.processManager.on("serverFullyStarted", () => {
+      console.log("Server detected as fully started from logs");
+      // This helps update the state faster than waiting for query
+      this.stateManager.setServerStatus("online");
+      this.emit("serverFullyStarted");
+    });
+
+    this.processManager.on("stopped", (code) => {
+      console.log(`Server process stopped with code ${code}`);
+
+      // Always update state to offline when the process stops
+      this.stateManager.setServerStatus("offline");
+
+      // Check if this was an unexpected stop
+      if (!this.stateManager.isServerStopping() && this.autoRestartOnCrash) {
+        console.log("Server crashed, attempting to restart...");
+        this.start().catch((err) => {
+          console.error("Failed to restart server after crash:", err);
+        });
+      }
+
+      this.emit("serverStopped", code);
+    });
+
+    this.processManager.on("serverOutput", (line) => {
+      this.emit("serverOutput", line);
+    });
+
+    this.processManager.on("serverError", (line) => {
+      this.emit("serverError", line);
+    });
+
+    // State manager events
+    this.stateManager.on("statusChanged", (state) => {
+      console.log(`Server status changed to ${state.status}`);
+
+      // Cross-validate with process manager
+      if (state.status === "offline" && this.processManager.isRunning()) {
+        console.log(
+          "State is offline but process is running - correcting state to starting"
+        );
+        this.stateManager.setServerStatus("starting");
+      } else if (
+        state.status === "online" &&
+        !this.processManager.isRunning()
+      ) {
+        console.log(
+          "State is online but process is not running - correcting state to offline"
+        );
+        this.stateManager.setServerStatus("offline");
+      }
+
+      this.emit("statusChanged", state);
+    });
+
+    this.stateManager.on("inactivityTimeout", async (state) => {
+      console.log("Inactivity timeout reached, shutting down server");
+      this.emit("inactivityTimeout", state);
+
+      try {
+        await this.stop();
+      } catch (error) {
+        console.error("Error shutting down server after inactivity:", error);
+      }
+    });
+
+    // New event handler for too many errors
+    this.stateManager.on("tooManyErrors", async (state) => {
+      console.log("Too many consecutive query errors, checking process status");
+
+      // Check if process is still running
+      if (!this.processManager.isRunning()) {
+        console.log("Process is not running, fixing state to offline");
+        this.stateManager.setServerStatus("offline");
+      } else {
+        console.log("Process is still running despite query errors");
+
+        // Process might be hung - consider restarting it
+        if (this.autoRestartOnCrash) {
+          console.log(
+            "Auto-restart is enabled, restarting server due to query errors"
+          );
+          try {
+            await this.stop();
+            setTimeout(() => {
+              this.start().catch((err) => {
+                console.error(
+                  "Failed to restart server after query errors:",
+                  err
+                );
+              });
+            }, 5000); // Give it 5 seconds before restarting
+          } catch (error) {
+            console.error("Error restarting server after query errors:", error);
+          }
+        }
+      }
+    });
+
+    // Server listener events
+    this.serverListener.on("connectionDetected", async (info) => {
+      console.log(
+        `Minecraft client connection detected from ${info.address}:${info.port}, starting server...`
+      );
+      this.emit("connectionDetected", info);
+
+      if (this.wakeOnDemandEnabled && !this.isRunning() && !this.pendingStart) {
+        try {
+          await this.start();
+        } catch (error) {
+          console.error(
+            "Error starting server after connection detection:",
+            error
+          );
+        }
+      }
+    });
+  }
+
+  /**
+   * Start the wake-on-demand listener
+   */
+  private async startWakeOnDemand(): Promise<void> {
+    if (this.isRunning() || this.serverListener.isRunning()) {
       return;
     }
 
@@ -94,324 +651,42 @@ export class MinecraftServerManager {
     }
   }
 
-  private stopListener(): void {
-    if (this.serverListener) {
-      this.serverListener.stop();
-      console.log("Wake-on-demand listener stopped");
-    }
-  }
-
-  public async start(): Promise<boolean> {
-    if (this.isRunning()) {
-      return true; // Server is already running
-    }
-
-    // Stop the listener if it's running
-    this.stopListener();
-
-    // Check if the server directory exists
-    if (!fs.existsSync(this.serverPath)) {
-      throw new Error(`Server directory not found: ${this.serverPath}`);
-    }
-
-    try {
-      if (this.startScript) {
-        // Use start.bat if provided
-        const scriptPath = join(this.serverPath, this.startScript);
-
-        if (!fs.existsSync(scriptPath)) {
-          throw new Error(`Start script not found: ${scriptPath}`);
-        }
-
-        console.log(`Starting server using script: ${scriptPath}`);
-
-        // Create a temporary batch file that will call our actual batch file
-        // This helps handle paths with spaces and also adds automatic continuation after server stop
-        const tempBatContent = `@echo off
-cd /d "${this.serverPath}"
-call "${this.startScript}"
-exit
-`;
-        const tempBatPath = join(process.cwd(), "temp_launcher.bat");
-
-        try {
-          fs.writeFileSync(tempBatPath, tempBatContent, "utf8");
-          console.log(`Created temporary launcher: ${tempBatPath}`);
-          console.log(`Launcher content: ${tempBatContent}`);
-
-          // Execute the temporary batch file
-          this.serverProcess = spawn(tempBatPath, [], {
-            stdio: ["pipe", "pipe", "pipe"],
-          });
-
-          // Clean up the temporary file when the server exits
-          this.serverProcess.on("close", () => {
-            try {
-              if (fs.existsSync(tempBatPath)) {
-                fs.unlinkSync(tempBatPath);
-                console.log(`Removed temporary launcher: ${tempBatPath}`);
-              }
-            } catch (error) {
-              console.error("Error removing temporary launcher:", error);
-            }
-          });
-        } catch (error) {
-          console.error("Error creating temporary launcher:", error);
-          throw error;
-        }
-      } else {
-        // Fallback to direct Java launch
-        const jarPath = join(this.serverPath, this.serverJarFile);
-
-        if (!fs.existsSync(jarPath)) {
-          throw new Error(`Server JAR file not found: ${jarPath}`);
-        }
-
-        console.log(`Starting server using Java: ${jarPath}`);
-
-        // Start the Minecraft server process directly with Java
-        this.serverProcess = spawn(
-          this.javaPath,
-          [`-Xmx${this.maxMemory}`, "-jar", this.serverJarFile, "nogui"],
-          {
-            cwd: this.serverPath,
-            stdio: ["pipe", "pipe", "pipe"],
-          }
-        );
-      }
-
-      // Log output from the server
-      this.serverProcess.stdout?.on("data", (data) => {
-        console.log(`[SERVER]: ${data.toString()}`);
-      });
-
-      this.serverProcess.stderr?.on("data", (data) => {
-        console.error(`[SERVER ERROR]: ${data.toString()}`);
-      });
-
-      // Handle process exit
-      this.serverProcess.on("close", (code) => {
-        console.log(`Server process exited with code ${code}`);
-        this.serverProcess = null;
-        this.stopInactivityChecker(); // Ensure checker is stopped when server stops
-
-        // Restart the listener if wake-on-demand is enabled
-        if (this.wakeOnDemandEnabled) {
-          this.startListener();
-        }
-      });
-
-      // Start the inactivity checker if enabled
-      if (this.inactivityTimeout > 0 && this.queryClient) {
-        // Give the server some time to start up before checking player count
-        setTimeout(() => {
-          this.startInactivityChecker();
-        }, 60000); // Wait 1 minute for server to fully start
-      }
-
-      return true;
-    } catch (error) {
-      console.error("Failed to start Minecraft server:", error);
-
-      // If we failed to start, restart the listener
-      if (this.wakeOnDemandEnabled) {
-        this.startListener();
-      }
-
-      return false;
-    }
-  }
-
-  public async stop(): Promise<boolean> {
-    if (!this.isRunning() || !this.serverProcess) {
-      this.shutdownInProgress = false;
-
-      // Ensure listener is running if wake-on-demand is enabled
-      if (this.wakeOnDemandEnabled) {
-        await this.startListener();
-      }
-
-      return true; // Server is not running
-    }
-
-    try {
-      // Set shutdown flag
-      this.shutdownInProgress = true;
-
-      // Stop the inactivity checker
-      this.stopInactivityChecker();
-
-      // Send 'stop' command to the server's stdin
-      this.serverProcess.stdin?.write("stop\n");
-
-      // Handle "Press any key to continue" in batch files by sending a key press
-      if (this.startScript) {
-        // Wait a bit for the server to initiate shutdown
-        setTimeout(() => {
-          if (this.serverProcess && this.serverProcess.stdin) {
-            // Send enter key to continue
-            this.serverProcess.stdin.write("\n");
-          }
-        }, 2000);
-      }
-
-      // Wait for the server to shut down gracefully
-      return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          // Force kill if taking too long
-          if (this.serverProcess) {
-            console.log(
-              "Server shutdown taking too long, force killing process"
-            );
-            this.serverProcess.kill();
-            this.serverProcess = null;
-          }
-          this.shutdownInProgress = false;
-
-          // Start listener if wake-on-demand is enabled
-          if (this.wakeOnDemandEnabled) {
-            this.startListener();
-          }
-
-          resolve(true);
-        }, 30000); // 30 seconds timeout
-
-        this.serverProcess?.on("close", () => {
-          clearTimeout(timeout);
-          this.serverProcess = null;
-          this.shutdownInProgress = false;
-
-          // Start listener if wake-on-demand is enabled
-          if (this.wakeOnDemandEnabled) {
-            this.startListener();
-          }
-
-          resolve(true);
-        });
-      });
-    } catch (error) {
-      console.error("Failed to stop Minecraft server:", error);
-      // Force kill the process
-      if (this.serverProcess) {
-        this.serverProcess.kill();
-        this.serverProcess = null;
-      }
-      this.shutdownInProgress = false;
-
-      // Start listener if wake-on-demand is enabled
-      if (this.wakeOnDemandEnabled) {
-        this.startListener();
-      }
-
-      return false;
-    }
-  }
-
-  // Auto-shutdown methods
-  public getInactivityTimeout(): number {
-    return this.inactivityTimeout;
-  }
-
-  public setInactivityTimeout(minutes: number): void {
-    const wasEnabled = this.inactivityTimeout > 0;
-    this.inactivityTimeout = minutes;
-
-    if (this.inactivityTimeout > 0 && this.isRunning()) {
-      if (this.inactivityCheckInterval) {
-        this.stopInactivityChecker();
-      }
-      this.startInactivityChecker();
-      console.log(`Auto-shutdown set to ${minutes} minutes of inactivity`);
-    } else if (wasEnabled) {
-      this.stopInactivityChecker();
-      console.log("Auto-shutdown disabled");
-    }
-  }
-
-  public startInactivityChecker(): void {
-    if (
-      this.inactivityTimeout <= 0 ||
-      !this.queryClient ||
-      this.inactivityCheckInterval
-    ) {
-      return; // Auto-shutdown is disabled or already running
-    }
-
-    this.emptyStartTime = null; // Reset the timer
-
-    // Check every minute
-    this.inactivityCheckInterval = setInterval(async () => {
-      await this.checkInactivity();
-    }, 60000); // Check every minute
-
-    console.log(
-      `Started inactivity checker (timeout: ${this.inactivityTimeout} minutes)`
-    );
-  }
-
-  public stopInactivityChecker(): void {
-    if (this.inactivityCheckInterval) {
-      clearInterval(this.inactivityCheckInterval);
-      this.inactivityCheckInterval = null;
-      this.emptyStartTime = null;
-      console.log("Stopped inactivity checker");
-    }
-  }
-
-  private async checkInactivity(): Promise<void> {
-    if (
-      !this.isRunning() ||
-      !this.queryClient ||
-      this.inactivityTimeout <= 0 ||
-      this.shutdownInProgress
-    ) {
+  /**
+   * Stop the wake-on-demand listener
+   */
+  private async stopWakeOnDemand(): Promise<void> {
+    if (!this.serverListener.isRunning()) {
       return;
     }
 
+    this.serverListener.stop();
+  }
+
+  /**
+   * Clean up resources when shutting down
+   */
+  public async cleanup(): Promise<void> {
+    // Stop server monitoring
+    this.stateManager.stopMonitoring();
+
+    // Stop wake-on-demand listener
+    await this.stopWakeOnDemand();
+
+    // Disconnect RCON
     try {
-      // Get server stats to check player count
-      const stats = await this.queryClient.getBasicStats();
-      const playerCount = stats.numPlayers || 0;
-
-      console.log(`[AUTO-SHUTDOWN] Current player count: ${playerCount}`);
-
-      if (playerCount === 0) {
-        // Server is empty
-        if (this.emptyStartTime === null) {
-          // Just became empty, start the timer
-          this.emptyStartTime = Date.now();
-          console.log(
-            "[AUTO-SHUTDOWN] Server is empty, starting inactivity timer"
-          );
-        } else {
-          // Check if timeout has been reached
-          const emptyTime = (Date.now() - this.emptyStartTime) / 60000; // Convert to minutes
-
-          console.log(
-            `[AUTO-SHUTDOWN] Server has been empty for ${emptyTime.toFixed(
-              2
-            )} minutes`
-          );
-
-          if (emptyTime >= this.inactivityTimeout) {
-            console.log(
-              `[AUTO-SHUTDOWN] Timeout reached (${this.inactivityTimeout} minutes), shutting down server`
-            );
-            await this.stop();
-          }
-        }
-      } else {
-        // Server has players, reset the timer
-        if (this.emptyStartTime !== null) {
-          console.log(
-            "[AUTO-SHUTDOWN] Players joined, resetting inactivity timer"
-          );
-          this.emptyStartTime = null;
-        }
-      }
-    } catch (error) {
-      console.error("[AUTO-SHUTDOWN] Error checking server inactivity:", error);
-      // Don't count errors as activity - if there's a temporary error, we still want to shut down eventually
+      await this.rconClient.disconnect();
+    } catch (e) {
+      // Ignore disconnection errors
     }
+
+    // Close query client
+    this.queryClient.close();
+
+    // If server is running, stop it
+    if (this.isRunning()) {
+      await this.stop();
+    }
+
+    console.log("Server manager cleanup complete");
   }
 }
